@@ -1,7 +1,8 @@
 """Read a filled PHPP workbook into a nested dict using the field map.
 
-Uses xlwings to drive Excel, which means all formula values are fully
-calculated — no cached-value issues, no data_only flag needed.
+Uses xlwings to drive Excel. Only captures designer-entered input
+values — formula cells are skipped so that the JSON record contains
+only data that can be meaningfully written back.
 """
 
 from __future__ import annotations
@@ -33,8 +34,15 @@ logger = logging.getLogger(__name__)
 def read_phpp(
     workbook_path: str | Path,
     field_map_path: str | Path = "phpp-field-mapping.md",
+    *,
+    skip_formulas: bool = True,
 ) -> dict[str, Any]:
-    """Read a filled PHPP workbook into a nested dict."""
+    """Read a filled PHPP workbook into a nested dict.
+
+    When *skip_formulas* is True (default), only designer-entered input
+    values are captured.  Formula cells are returned as None so the JSON
+    record contains only data that can be meaningfully written back.
+    """
     app = excel_app()
     try:
         wb = open_book(app, str(Path(workbook_path).resolve()))
@@ -49,7 +57,8 @@ def read_phpp(
                             sheet_name, ws_key)
                 continue
             ws = wb.sheets[sheet_name]
-            ws_result = _read_worksheet(ws, wb, ws_spec)
+            ws_result = _read_worksheet(ws, wb, ws_spec,
+                                        skip_formulas=skip_formulas)
             if ws_result:
                 result[ws_key] = ws_result
 
@@ -62,23 +71,28 @@ def read_phpp(
 
 
 def _read_worksheet(
-    ws: xw.Sheet, wb: xw.Book, ws_spec: dict[str, Any]
+    ws: xw.Sheet, wb: xw.Book, ws_spec: dict[str, Any],
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     """Extract all mapped values from a single worksheet."""
     ws_result: dict[str, Any] = {}
 
     if ws_spec.get("fields"):
-        resolved = _read_label_anchored_fields(ws, ws_spec["fields"])
+        resolved = _read_label_anchored_fields(
+            ws, ws_spec["fields"], skip_formulas=skip_formulas)
         if resolved:
             ws_result.update(resolved)
 
     if ws_spec.get("config"):
-        config_resolved = _read_config(ws, wb, ws_spec["config"])
+        config_resolved = _read_config(
+            ws, wb, ws_spec["config"], skip_formulas=skip_formulas)
         if config_resolved:
             ws_result["_config"] = config_resolved
 
     for sec_name, sec_spec in ws_spec.get("sections", {}).items():
-        sec_result = _read_section(ws, wb, sec_spec, ws_spec.get("config", {}))
+        sec_result = _read_section(
+            ws, wb, sec_spec, ws_spec.get("config", {}),
+            skip_formulas=skip_formulas)
         if sec_result:
             ws_result[sec_name] = sec_result
 
@@ -90,7 +104,8 @@ def _read_worksheet(
 # ---------------------------------------------------------------------------
 
 def _read_label_anchored_fields(
-    ws: xw.Sheet, fields: dict[str, dict]
+    ws: xw.Sheet, fields: dict[str, dict],
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for field_name, spec in fields.items():
@@ -102,6 +117,7 @@ def _read_label_anchored_fields(
             locator_string=spec["locator_string"],
             input_col=spec["input_col"],
             row_offset=spec.get("row_offset", 0),
+            skip_formulas=skip_formulas,
         )
         result[field_name] = val
     return result
@@ -112,15 +128,18 @@ def _read_label_anchored_fields(
 # ---------------------------------------------------------------------------
 
 def _read_config(
-    ws: xw.Sheet, wb: xw.Book, config: dict[str, Any]
+    ws: xw.Sheet, wb: xw.Book, config: dict[str, Any],
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in config.items():
         kind = classify_item(key, value)
         if kind == "address":
-            result[key] = resolve_absolute(ws, value)
+            result[key] = resolve_absolute(ws, value,
+                                           skip_formulas=skip_formulas)
         elif kind == "named_range":
-            result[key] = resolve_named_range(wb, value)
+            result[key] = resolve_named_range(wb, value,
+                                              skip_formulas=skip_formulas)
         else:
             result[key] = value
     return result
@@ -135,6 +154,8 @@ def _read_section(
     wb: xw.Book,
     sec_spec: dict[str, Any],
     ws_config: dict[str, Any],
+    *,
+    skip_formulas: bool = True,
 ) -> dict[str, Any] | list[dict[str, Any]] | None:
     """Read a single section, dispatching based on what keys are present."""
     has_header = "header_locator" in sec_spec
@@ -148,21 +169,26 @@ def _read_section(
     items = sec_spec.get("items", {})
     entry_row_start = items.get(
         "entry_row_start") or items.get("entry_start_row")
+    sf = skip_formulas
 
     if has_header and has_entry and has_row_fields and not has_col_fields:
-        return _read_row_offset_section(ws, sec_spec)
+        return _read_row_offset_section(ws, sec_spec, skip_formulas=sf)
     if has_col_fields and has_row_fields:
-        return _read_column_row_section(ws, sec_spec, entry_row_start)
+        return _read_column_row_section(ws, sec_spec, entry_row_start,
+                                        skip_formulas=sf)
     if has_header and has_entry and has_col_fields:
-        return _read_block_section(ws, sec_spec, entry_row_start)
+        return _read_block_section(ws, sec_spec, entry_row_start,
+                                   skip_formulas=sf)
     if has_col_fields and not has_header:
-        return _read_static_column_section(ws, sec_spec, entry_row_start)
+        return _read_static_column_section(ws, sec_spec, entry_row_start,
+                                           skip_formulas=sf)
     if has_appliance:
         return _read_appliance_section(ws, sec_spec)
     if has_items:
-        return _read_items_section(ws, wb, items)
+        return _read_items_section(ws, wb, items, skip_formulas=sf)
     if has_fields:
-        return _read_label_anchored_fields(ws, sec_spec["fields"])
+        return _read_label_anchored_fields(ws, sec_spec["fields"],
+                                           skip_formulas=sf)
     if has_header and not has_entry and not has_col_fields:
         return _read_header_only(ws, sec_spec)
     return None
@@ -176,6 +202,8 @@ def _read_block_section(
     ws: xw.Sheet,
     sec_spec: dict[str, Any],
     entry_row_start: int | None,
+    *,
+    skip_formulas: bool = True,
 ) -> list[dict[str, Any]]:
     return resolve_block(
         ws,
@@ -183,11 +211,13 @@ def _read_block_section(
         entry_locator=sec_spec.get("entry_locator", {}),
         column_fields=sec_spec["column_fields"],
         entry_row_start=entry_row_start,
+        skip_formulas=skip_formulas,
     )
 
 
 def _read_row_offset_section(
-    ws: xw.Sheet, sec_spec: dict[str, Any]
+    ws: xw.Sheet, sec_spec: dict[str, Any],
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     entry_loc = sec_spec["entry_locator"]
     anchor_row = find_row_in_col(ws, entry_loc["col"], entry_loc["string"])
@@ -199,7 +229,8 @@ def _read_row_offset_section(
     for field_name, field_spec in sec_spec["row_fields"].items():
         offset = field_spec.get("row_offset", field_spec.get("row", 0))
         result[field_name] = resolve_row_offset(
-            ws, anchor_row, input_col, offset)
+            ws, anchor_row, input_col, offset,
+            skip_formulas=skip_formulas)
     return result
 
 
@@ -207,6 +238,7 @@ def _read_column_row_section(
     ws: xw.Sheet,
     sec_spec: dict[str, Any],
     entry_row_start: int | None,
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     if entry_row_start is None:
         entry_loc = sec_spec.get("entry_locator", {})
@@ -223,7 +255,8 @@ def _read_column_row_section(
         for field_name, field_spec in sec_spec["row_fields"].items():
             offset = field_spec.get("row_offset", field_spec.get("row", 0))
             entity[field_name] = resolve_row_offset(
-                ws, entry_row_start, col_letter, offset)
+                ws, entry_row_start, col_letter, offset,
+                skip_formulas=skip_formulas)
         result[col_name] = entity
     return result
 
@@ -232,6 +265,7 @@ def _read_static_column_section(
     ws: xw.Sheet,
     sec_spec: dict[str, Any],
     entry_row_start: int | None,
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any] | list[dict[str, Any]]:
     items = sec_spec.get("items", {})
     start_row = entry_row_start or items.get("entry_start_row")
@@ -243,7 +277,8 @@ def _read_static_column_section(
             row_data: dict[str, Any] = {"_row": row}
             all_none = True
             for field_name, field_spec in sec_spec["column_fields"].items():
-                val = resolve_row_offset(ws, row, field_col(field_spec), 0)
+                val = resolve_row_offset(ws, row, field_col(field_spec), 0,
+                                         skip_formulas=skip_formulas)
                 row_data[field_name] = val
                 if val is not None:
                     all_none = False
@@ -260,22 +295,26 @@ def _read_static_column_section(
 # ---------------------------------------------------------------------------
 
 def _read_items_section(
-    ws: xw.Sheet, wb: xw.Book, items: dict[str, Any]
+    ws: xw.Sheet, wb: xw.Book, items: dict[str, Any],
+    *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in items.items():
         if isinstance(value, dict):
             if "col" in value and "row" in value:
                 result[key] = resolve_fixed(
-                    ws, row=value["row"], col=value["col"])
+                    ws, row=value["row"], col=value["col"],
+                    skip_formulas=skip_formulas)
             else:
                 result[key] = value
         else:
             kind = classify_item(key, value)
             if kind == "address":
-                result[key] = resolve_absolute(ws, value)
+                result[key] = resolve_absolute(ws, value,
+                                               skip_formulas=skip_formulas)
             elif kind == "named_range":
-                result[key] = resolve_named_range(wb, value)
+                result[key] = resolve_named_range(wb, value,
+                                                  skip_formulas=skip_formulas)
             else:
                 result[key] = value
     return result

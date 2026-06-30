@@ -62,9 +62,26 @@ def field_col(spec: str | dict) -> str:
     return spec if isinstance(spec, str) else spec.get("column", "A")
 
 
-def cell_value(ws: xw.Sheet, col: str, row: int) -> Any:
-    """Read a single cell by column letter(s) and row number."""
-    return ws.range((row, col_to_idx(col))).value
+def is_formula(ws: xw.Sheet, col: str, row: int) -> bool:
+    """Return True if a cell contains a formula."""
+    f = ws.range((row, col_to_idx(col))).formula
+    return isinstance(f, str) and f.startswith("=")
+
+
+def cell_value(
+    ws: xw.Sheet, col: str, row: int, *, skip_formulas: bool = False,
+) -> Any:
+    """Read a single cell by column letter(s) and row number.
+
+    When *skip_formulas* is True, returns None for formula cells so
+    only designer-entered input values are captured.
+    """
+    rng = ws.range((row, col_to_idx(col)))
+    if skip_formulas:
+        f = rng.formula
+        if isinstance(f, str) and f.startswith("="):
+            return None
+    return rng.value
 
 
 def find_row_in_col(
@@ -143,6 +160,8 @@ def resolve_label_anchored(
     locator_string: str,
     input_col: str,
     row_offset: int = 0,
+    *,
+    skip_formulas: bool = False,
 ) -> Any:
     """Find locator_string in locator_col, read input_col."""
     row = find_row_in_col(ws, locator_col, locator_string)
@@ -152,7 +171,8 @@ def resolve_label_anchored(
             locator_string, locator_col, ws.name,
         )
         return None
-    return cell_value(ws, input_col, row + row_offset)
+    return cell_value(ws, input_col, row + row_offset,
+                      skip_formulas=skip_formulas)
 
 
 # ---------------------------------------------------------------------------
@@ -170,10 +190,12 @@ def resolve_block(
     *,
     end_marker: str = _DEFAULT_END_MARKER,
     entry_row_start: int | None = None,
+    skip_formulas: bool = False,
 ) -> list[dict[str, Any]]:
     """Iterate a repeating block, returning one dict per data row.
 
     Reads all needed columns in a single batch for performance.
+    When *skip_formulas* is True, formula cells are returned as None.
     """
     entry_col = entry_locator.get("col", header_locator.get("col", "A"))
 
@@ -215,9 +237,8 @@ def resolve_block(
     max_col = max(all_col_idxs)
 
     # One AppleScript call: read the entire rectangular region
-    raw = ws.range(
-        (start_row, min_col), (last_row, max_col)
-    ).value
+    rng = ws.range((start_row, min_col), (last_row, max_col))
+    raw = rng.value
     if raw is None:
         return []
     # xlwings returns flat list for single-row OR single-column ranges
@@ -228,6 +249,20 @@ def resolve_block(
             raw = [[v] for v in raw]
         else:
             raw = [raw]
+
+    # Optional: batch-read formulas to filter out formula cells
+    formula_mask = None
+    if skip_formulas:
+        raw_f = rng.formula
+        if raw_f is not None:
+            if not isinstance(raw_f, list):
+                raw_f = [[raw_f]]
+            elif not isinstance(raw_f[0], list):
+                if min_col == max_col:
+                    raw_f = [[v] for v in raw_f]
+                else:
+                    raw_f = [raw_f]
+            formula_mask = raw_f
 
     entry_offset = entry_col_idx - min_col
     field_offsets = [idx - min_col for idx in field_col_idxs]
@@ -248,6 +283,10 @@ def resolve_block(
         all_none = True
         for j, field_name in enumerate(field_names):
             val = row_vals[field_offsets[j]]
+            if formula_mask is not None:
+                f = formula_mask[i][field_offsets[j]]
+                if isinstance(f, str) and f.startswith("="):
+                    val = None
             row_data[field_name] = val
             if val is not None:
                 all_none = False
@@ -282,10 +321,16 @@ def resolve_block(
 # Strategy 3: Named range
 # ---------------------------------------------------------------------------
 
-def resolve_named_range(wb: xw.Book, name: str) -> Any:
+def resolve_named_range(
+    wb: xw.Book, name: str, *, skip_formulas: bool = False,
+) -> Any:
     """Resolve a German Excel defined name to its value."""
     try:
         rng = wb.names[name].refers_to_range
+        if skip_formulas:
+            f = rng.formula
+            if isinstance(f, str) and f.startswith("="):
+                return None
         return rng.value
     except (KeyError, AttributeError):
         logger.warning("Named range %r not found in workbook", name)
@@ -296,9 +341,16 @@ def resolve_named_range(wb: xw.Book, name: str) -> Any:
 # Strategy 4: Absolute address
 # ---------------------------------------------------------------------------
 
-def resolve_absolute(ws: xw.Sheet, address: str) -> Any:
+def resolve_absolute(
+    ws: xw.Sheet, address: str, *, skip_formulas: bool = False,
+) -> Any:
     """Return the value at a fixed cell reference like 'C11'."""
-    return ws.range(address).value
+    rng = ws.range(address)
+    if skip_formulas:
+        f = rng.formula
+        if isinstance(f, str) and f.startswith("="):
+            return None
+    return rng.value
 
 
 # ---------------------------------------------------------------------------
@@ -310,18 +362,23 @@ def resolve_row_offset(
     anchor_row: int,
     col: str,
     row_offset: int = 0,
+    *,
+    skip_formulas: bool = False,
 ) -> Any:
     """Return value at *col*, *anchor_row* + *row_offset*."""
-    return cell_value(ws, col, anchor_row + row_offset)
+    return cell_value(ws, col, anchor_row + row_offset,
+                      skip_formulas=skip_formulas)
 
 
 # ---------------------------------------------------------------------------
 # Strategy 6: Fixed result rows/cols
 # ---------------------------------------------------------------------------
 
-def resolve_fixed(ws: xw.Sheet, *, row: int, col: str) -> Any:
+def resolve_fixed(
+    ws: xw.Sheet, *, row: int, col: str, skip_formulas: bool = False,
+) -> Any:
     """Read a fixed result location (typically formula outputs)."""
-    return cell_value(ws, col, row)
+    return cell_value(ws, col, row, skip_formulas=skip_formulas)
 
 
 # ---------------------------------------------------------------------------
