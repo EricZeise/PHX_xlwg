@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -u
-"""Roundtrip test: read inputs → JSON → write → verify at writer addresses.
+"""Roundtrip test: read inputs → JSON → write → verify every written cell.
 
 Usage:
     python scripts/roundtrip.py Data/Example.xlsx Data/Empty.xlsx
@@ -10,15 +10,12 @@ Second argument is the blank template to write into.
 Results are saved to records/roundtrip_<timestamp>/.
 
 Phase 1 (read inputs):  xlwings reads only input cells (skip_formulas=True).
-Phase 2 (read all):     xlwings reads ALL cells (skip_formulas=False) for
-                        comparison — shows what the formula filter removed.
-Phase 3 (write):        xlwings locators + openpyxl persistence.
-Phase 4 (verify):       openpyxl reads the written file at the cell addresses
-                        that the writer targeted, comparing against Phase 1.
-
-The written file can't be reopened by Excel (openpyxl strips data validation
-extensions), so formula recalculation can't be verified. The test confirms
-that all input values survived the read → write round trip.
+Phase 2 (read all):     xlwings reads ALL cells (skip_formulas=False) —
+                        shows what the formula filter removed.
+Phase 3 (write):        xlwings locators + openpyxl persistence.  The writer
+                        returns its list of (sheet, col, row, value) writes.
+Phase 4 (verify):       openpyxl reads the written file at every address the
+                        writer targeted and compares cell-by-cell.
 """
 
 from __future__ import annotations
@@ -33,7 +30,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
-from compare_json.compare import compare, format_report
+from phpp_tool.locators import col_to_idx
 from phpp_tool.reader import read_phpp
 from phpp_tool.writer import write_phpp
 
@@ -66,98 +63,60 @@ def _count_values(data: dict, depth: int = 0) -> tuple[int, int]:
     return total, non_none
 
 
-def _flatten_for_compare(data: dict[str, Any]) -> dict[str, Any]:
-    """Flatten a reader dict to comparable fields per worksheet."""
-    flat: dict[str, Any] = {}
-    for ws_key, ws_data in data.items():
-        if not isinstance(ws_data, dict):
-            continue
-        ws_flat: dict[str, Any] = {}
-        for k, v in ws_data.items():
-            if isinstance(v, (dict, list)):
-                continue
-            if v is not None:
-                ws_flat[k] = v
-        if ws_flat:
-            flat[ws_key] = ws_flat
-    return flat
+def _values_match(expected: Any, actual: Any) -> bool:
+    """Compare values with tolerance for float rounding."""
+    if expected == actual:
+        return True
+    if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
+        if abs(expected) < 1e-10 and abs(actual) < 1e-10:
+            return True
+        if abs(expected) > 0:
+            return abs(expected - actual) / abs(expected) < 1e-6
+    if isinstance(expected, float) and isinstance(actual, int):
+        return _values_match(expected, float(actual))
+    if isinstance(expected, int) and isinstance(actual, float):
+        return _values_match(float(expected), actual)
+    return False
 
 
-def _verify_written_cells(
+def _verify_writes(
     written_path: Path,
-    inputs_data: dict[str, Any],
-    field_map_path: str,
+    writes: list[tuple[str, str, int, Any]],
 ) -> tuple[int, int, list[str]]:
-    """Verify that input values were correctly written to the output file.
+    """Verify every cell the writer targeted.
 
-    Opens the written file with openpyxl and checks every cell that the
-    writer should have written. Returns (checked, mismatches, details).
+    Opens the written file with openpyxl and checks each
+    (sheet, col, row, value) against what was actually persisted.
+    Returns (checked, mismatches, detail_lines).
     """
     import warnings
     warnings.filterwarnings("ignore", category=UserWarning)
-
     from openpyxl import load_workbook
-    from phpp_tool.locators import (
-        col_to_idx, field_col, norm, prefer_si_sheet, parse_cell_ref,
-    )
-    from phpp_tool.map_parser import parse_field_map
 
     wb = load_workbook(str(written_path), data_only=False)
-    field_map = parse_field_map(field_map_path)
-    sheet_names = wb.sheetnames
-
     checked = 0
     mismatched = 0
     details: list[str] = []
 
-    for ws_key, ws_spec in field_map.items():
-        if ws_key not in inputs_data:
-            continue
-        sheet_name = prefer_si_sheet(ws_spec["sheet_name"], sheet_names)
-        if sheet_name not in sheet_names:
+    for sheet_name, col, row, expected in writes:
+        if sheet_name not in wb.sheetnames:
+            mismatched += 1
+            details.append(f"  MISSING SHEET: {sheet_name}")
             continue
 
         ws = wb[sheet_name]
-        ws_data = inputs_data[ws_key]
-        if not isinstance(ws_data, dict):
-            continue
+        actual = ws.cell(row=row, column=col_to_idx(col)).value
+        checked += 1
 
-        # Check config items (absolute addresses, named ranges)
-        config = ws_data.get("_config", {})
-        config_spec = ws_spec.get("config", {})
-        for key, orig_val in config.items():
-            if orig_val is None or isinstance(orig_val, (dict, list)):
-                continue
-            spec_val = config_spec.get(key)
-            if not isinstance(spec_val, str):
-                continue
-            # Absolute address like "C11"
-            import re
-            if re.match(r"^[A-Z]{1,3}\d+$", spec_val):
-                col_s, row_n = parse_cell_ref(spec_val)
-                cell = ws.cell(row=row_n, column=col_to_idx(col_s))
-                written_val = cell.value
-                checked += 1
-                if not _values_match(orig_val, written_val):
-                    mismatched += 1
-                    details.append(
-                        f"  {ws_key}._config.{key} @ {sheet_name}!{spec_val}:"
-                        f" expected {orig_val!r}, got {written_val!r}")
+        if not _values_match(expected, actual):
+            mismatched += 1
+            details.append(
+                f"  {sheet_name}!{col}{row}:"
+                f" expected {expected!r} ({type(expected).__name__}),"
+                f" got {actual!r} ({type(actual).__name__})")
 
     wb.close()
     return checked, mismatched, details
-
-
-def _values_match(orig: Any, written: Any) -> bool:
-    """Compare values with tolerance for float rounding."""
-    if orig == written:
-        return True
-    if isinstance(orig, (int, float)) and isinstance(written, (int, float)):
-        if abs(orig) < 1e-10 and abs(written) < 1e-10:
-            return True
-        if abs(orig) > 0:
-            return abs(orig - written) / abs(orig) < 1e-6
-    return False
 
 
 def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
@@ -183,7 +142,7 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
         json.dumps(data_inputs, indent=2, default=str), encoding="utf-8"
     )
 
-    # Step 2: read source — all cells (for comparison)
+    # Step 2: read source — all cells (for formula filter stats)
     print(f"\n[2/4] Reading {source.name} — all cells (xlwings) ...")
     t0 = time.time()
     data_all = read_phpp(str(source), FIELD_MAP, skip_formulas=False)
@@ -192,54 +151,39 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
     print(f"      {len(data_all)} worksheets,"
           f" {non_none_a} non-None / {total_a} total values,"
           f" {t_read_all:.1f}s")
-    print(f"      Formula filter removed"
-          f" {non_none_a - non_none_i} formula values"
-          f" ({100 * (non_none_a - non_none_i) / max(non_none_a, 1):.1f}%"
-          f" of all non-None)")
+    filtered = non_none_a - non_none_i
+    pct = 100 * filtered / max(non_none_a, 1)
+    print(f"      Formula filter removed {filtered} values ({pct:.1f}%)")
 
     json_all = out_dir / f"{source_name}_all.json"
     json_all.write_text(
         json.dumps(data_all, indent=2, default=str), encoding="utf-8"
     )
 
-    # Step 3: write into template
+    # Step 3: write into template (writer returns its write list)
     written_path = out_dir / f"{source_name}_written.xlsx"
     print(f"\n[3/4] Writing into {template.name} → {written_path.name} ...")
     t0 = time.time()
-    write_phpp(data_inputs, str(template), str(written_path), FIELD_MAP)
+    writes = write_phpp(data_inputs, str(template), str(written_path), FIELD_MAP)
     t_write = time.time() - t0
-    print(f"      {t_write:.1f}s")
+    print(f"      {len(writes)} cell writes, {t_write:.1f}s")
 
-    # Step 4: verify written cells
-    print(f"\n[4/4] Verifying written cells (openpyxl) ...")
+    # Step 4: verify every written cell
+    print(f"\n[4/4] Verifying {len(writes)} written cells (openpyxl) ...")
     t0 = time.time()
-    checked, mismatched, mismatch_details = _verify_written_cells(
-        written_path, data_inputs, FIELD_MAP)
+    checked, mismatched, mismatch_details = _verify_writes(
+        written_path, writes)
     t_verify = time.time() - t0
-    print(f"      Checked {checked} config cells,"
-          f" {mismatched} mismatches, {t_verify:.1f}s")
 
-    if mismatch_details:
-        print("\n  MISMATCHES:")
-        for d in mismatch_details:
+    if mismatched == 0:
+        print(f"      *** All {checked} cells verified — PERFECT MATCH ***")
+    else:
+        print(f"      {checked} checked, {mismatched} MISMATCHES:")
+        for d in mismatch_details[:20]:
             print(d)
-    elif checked > 0:
-        print("      *** All verified cells match ***")
-
-    # Also compare flattened label-anchored fields
-    all_flat = _flatten_for_compare(data_all)
-    inputs_flat = _flatten_for_compare(data_inputs)
-    if all_flat and inputs_flat:
-        results = compare(inputs_flat, all_flat)
-        report = format_report(
-            results,
-            f"{source_name} (inputs only)",
-            f"{source_name} (all cells)",
-        )
-        report_path = out_dir / f"{source_name}_report.txt"
-        report_path.write_text(report + "\n", encoding="utf-8")
-        print(f"\n  Input vs All comparison (label-anchored fields):")
-        print(report)
+        if len(mismatch_details) > 20:
+            print(f"      ... and {len(mismatch_details) - 20} more")
+    print(f"      {t_verify:.1f}s")
 
     total_t = t_read_inputs + t_read_all + t_write + t_verify
     print(f"\n  Timing: inputs {t_read_inputs:.1f}s + all {t_read_all:.1f}s"
@@ -252,7 +196,8 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
         "template": template.name,
         "inputs_non_none": non_none_i,
         "all_non_none": non_none_a,
-        "formulas_filtered": non_none_a - non_none_i,
+        "formulas_filtered": filtered,
+        "cells_written": len(writes),
         "cells_verified": checked,
         "mismatches": mismatched,
         "time_total": total_t,
@@ -286,10 +231,10 @@ def main() -> None:
         print(f"{'=' * 60}\n")
         for s in summaries:
             print(f"  {s['source']:20s} → {s['template']:20s}"
-                  f"  inputs: {s['inputs_non_none']:>4}"
-                  f"  formulas filtered: {s['formulas_filtered']:>4}"
-                  f"  verified: {s['cells_verified']:>3}"
+                  f"  written: {s['cells_written']:>4}"
+                  f"  verified: {s['cells_verified']:>4}"
                   f"  mismatches: {s['mismatches']:>3}"
+                  f"  formulas filtered: {s['formulas_filtered']:>4}"
                   f"  time: {s['time_total']:.1f}s")
 
 

@@ -36,8 +36,12 @@ def write_phpp(
     template_path: str | Path,
     output_path: str | Path,
     field_map_path: str | Path = "phpp-field-mapping.md",
-) -> None:
-    """Write a building record into a PHPP workbook template."""
+) -> list[tuple[str, str, int, Any]]:
+    """Write a building record into a PHPP workbook template.
+
+    Returns the list of writes performed as (sheet_name, col, row, value)
+    tuples, for verification by callers.
+    """
     template_path = Path(template_path)
     output_path = Path(output_path)
 
@@ -76,6 +80,7 @@ def write_phpp(
 
     _apply_writes_openpyxl(output_path, pending)
     logger.info("Wrote %d cell values", total_writes)
+    return pending
 
 
 def _apply_writes_openpyxl(
