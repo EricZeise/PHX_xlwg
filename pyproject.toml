@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phpp-data-tool"
+version = "0.2.0"
+description = "Read and write Passive House (PHPP) input data via xlwings"
+requires-python = ">=3.10"
+dependencies = [
+    "xlwings>=0.31",
+    "click>=8.0",
+    "pydantic>=2.0",
+    "openpyxl>=3.1",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "openpyxl>=3.1"]
+
+[project.scripts]
+phpp-tool = "phpp_tool.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
