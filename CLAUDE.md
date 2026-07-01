@@ -65,7 +65,7 @@ phpp-field-mapping.md   (locator dictionary — where each field lives)
 ## Repository structure
 
 ```
-PHX_xlw/
+PHX_xlwg/
 ├── CLAUDE.md                    ← this file
 ├── pyproject.toml               ← deps: xlwings, click, pydantic, openpyxl
 ├── phpp-field-mapping.md        ← the locator dictionary (31 worksheets)

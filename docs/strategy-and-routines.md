@@ -1,4 +1,4 @@
-# PHX_xlw: Strategy and Routine Reference
+# PHX_xlwg: Strategy and Routine Reference
 
 ## Part 1 — Strategy Summary
 
