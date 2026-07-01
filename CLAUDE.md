@@ -6,9 +6,8 @@ A Python CLI that **reads designer-entered input data from a filled PHPP workboo
 
 This is a rewrite of the openpyxl-based PHX_Dev tool using **xlwings** as the Excel backend. xlwings drives a live Excel instance, which means:
 - **Formulas recalculate automatically** — no cached-value issues
-- **No surgical XML editing** — Excel handles its own serialization
 - **No formula chain tracing** — write to input cells, formulas update
-- **Charts, drawings, data validations all survive** — Excel manages them natively
+- **Charts, drawings, data validations all survive** — writes persist via a surgical ZIP/XML patch (same mechanism PHX_Dev originated), not an openpyxl save, so `<extLst>`/`<headerFooter>` content is preserved
 
 ### MVP pipeline
 
@@ -32,7 +31,7 @@ phpp-field-mapping.md   (locator dictionary — where each field lives)
    locators.py          (6 addressing strategies to find cells)
         ↓
  ┌──────┴──────┐
- reader.py    writer.py  (xlwings locators + openpyxl persistence)
+ reader.py    writer.py  (xlwings locators + surgical XML persistence)
  └──────┬──────┘
      models.py           (pydantic validation)
         ↓
@@ -45,9 +44,9 @@ phpp-field-mapping.md   (locator dictionary — where each field lives)
 |---------|-------------------|----------------------|
 | Formula values | Stale cached values; needed `data_only=True/False` | Always current — Excel recalculates |
 | Writing to formula cells | Phase 1b: trace formula chains, redirect writes, overwrite formulas | Not needed — write to input cells, formulas update |
-| File integrity | Surgical ZIP/XML splicing (lxml) | xlwings for addressing, openpyxl for persistence |
-| Dependencies | openpyxl, lxml | xlwings, openpyxl (requires Excel for reads + locator resolution) |
-| writer.py size | ~770 lines | ~290 lines |
+| File integrity | Surgical ZIP/XML splicing (lxml) | Same surgical ZIP/XML splicing (`surgical_writer.py`), fed by xlwings-resolved addresses instead of openpyxl-resolved ones |
+| Dependencies | openpyxl, lxml | xlwings, openpyxl, lxml (requires Excel for reads + locator resolution) |
+| writer.py size | ~770 lines | ~290 lines (address resolution only; persistence lives in `surgical_writer.py`) |
 | Headless operation | Yes | No (needs Excel) |
 
 ### What stayed the same
@@ -67,7 +66,7 @@ phpp-field-mapping.md   (locator dictionary — where each field lives)
 ```
 PHX_xlwg/
 ├── CLAUDE.md                    ← this file
-├── pyproject.toml               ← deps: xlwings, click, pydantic, openpyxl
+├── pyproject.toml               ← deps: xlwings, click, pydantic, openpyxl, lxml
 ├── phpp-field-mapping.md        ← the locator dictionary (31 worksheets)
 ├── src/
 │   ├── phpp_tool/
@@ -76,7 +75,8 @@ PHX_xlwg/
 │   │   ├── map_parser.py        ← Parse phpp-field-mapping.md → structured dict
 │   │   ├── locators.py          ← 6 addressing strategies (xlwings)
 │   │   ├── reader.py            ← xlwings-based reader
-│   │   ├── writer.py            ← xlwings locators + openpyxl writer (~340 lines)
+│   │   ├── writer.py            ← xlwings address resolution, collects writes (~290 lines)
+│   │   ├── surgical_writer.py   ← Persists writes via ZIP/XML patch (lxml), preserving extLst/headerFooter
 │   │   ├── excel_app.py         ← Excel app factory (macOS path detection)
 │   │   └── models.py            ← Pydantic models for building record JSON
 │   └── compare_json/            ← Standalone JSON diff tool

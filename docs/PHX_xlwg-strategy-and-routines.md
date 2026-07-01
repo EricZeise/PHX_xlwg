@@ -8,12 +8,9 @@ Read designer-entered input data from a filled PHPP workbook (Passive House Plan
 
 ### Why xlwings
 
-The PHPP is a heavily formulated Excel workbook. An earlier approach (PHX_Dev) used openpyxl to read and write cells directly, but hit two fundamental problems:
+The PHPP is a heavily formulated Excel workbook. An earlier approach (PHX_Dev) used openpyxl to read cells directly, which has one fundamental problem xlwings solves: **stale formula values** — openpyxl reads cached results, not live recalculations, so any cell whose value depends on another input cell may be out of date. xlwings solves this by driving a live Excel instance via AppleScript (macOS) or COM (Windows), so formulas recalculate on the fly.
 
-1. **Stale formula values.** openpyxl reads cached results, not live recalculations. Any cell whose value depends on another input cell may be out of date.
-2. **File corruption.** openpyxl's load→save cycle strips Excel extensions (data validation rules, custom header/footers) that PHPP relies on, making the file unopenable in Excel.
-
-xlwings solves both: it drives a live Excel instance via AppleScript (macOS) or COM (Windows), so formulas recalculate on the fly and the file format is never touched by Python's XML serializer.
+(PHX_Dev's *write* side had a related historical problem — an early naive openpyxl load→save cycle stripped Excel extensions, data validation rules, and custom headers/footers — but PHX_Dev resolved this itself with a surgical ZIP/XML patch that edits only the `<sheetData>` region of affected sheets, never touching `<extLst>`/`<headerFooter>` content. Both PHX_pyxl and PHX_xlwg have since adopted the same mechanism — see `surgical_writer.py` in the routine walkthrough below — so file corruption on write is not a reason to prefer xlwings over openpyxl; only live formula recalculation is.)
 
 ### The hybrid architecture
 
@@ -23,7 +20,7 @@ A pure xlwings round trip would be ideal, but macOS 26 introduced an AppleScript
 |-------|--------|---------|
 | **Read** | xlwings (Excel) | Open the filled workbook in Excel. Walk the field map, resolve every locator against the live sheet, read input cell values. |
 | **Write — address resolution** | xlwings (Excel) | Open the template in Excel. Walk the field map again to resolve where each value should go (label searches, named ranges, entry-row detection). Collect writes as `(sheet, col, row, value)` tuples — but do not save. |
-| **Write — persistence** | openpyxl (no Excel) | Close Excel. Reopen the .xlsx with openpyxl, apply all collected writes, save. openpyxl's save corrupts some PHPP features, but the resulting file is usable as a data artifact and can be verified cell-by-cell. |
+| **Write — persistence** | `surgical_writer.py` (no Excel) | Close Excel (without saving — the on-disk copy stays byte-identical to the template). Patch the `.xlsx` as a ZIP archive: edit only the `<sheetData>` region of sheets with writes via `lxml`, leaving `<extLst>`/`<headerFooter>`/everything else as untouched original bytes. Verified byte-for-byte across all 83 sheets of a full roundtrip write. |
 
 ### Formula-aware filtering
 
@@ -48,7 +45,93 @@ The roundtrip test confirms data fidelity end to end. The writer returns its ful
 
 ---
 
-## Part 2 — Routine-by-Routine Walkthrough
+## Part 2 — Using the Routines and Scripts
+
+This section shows exactly how to invoke everything described in Part 1: the `phpp-tool` CLI and the roundtrip script. All commands assume Excel is installed, an activated venv, and a working directory at the project root.
+
+```bash
+cd /Users/smini/Documents/Coding/PHX_xlwg
+source .venv/bin/activate
+```
+
+**If `.venv/` is missing or broken** (e.g. after a folder rename — see the known venv-path issue), recreate it before running anything:
+
+```bash
+rm -rf .venv
+python3.13 -m venv .venv
+.venv/bin/pip install -e ".[dev]"
+```
+
+### `phpp-tool read` — extract a filled workbook to JSON
+
+```bash
+phpp-tool read Data/Example.xlsx -o records/my_building.json
+```
+
+- `WORKBOOK` (positional) — path to the filled `.xlsx` to read.
+- `-o, --output` — JSON output path (omit to print to stdout).
+- `--field-map` — override the field map markdown (defaults to `phpp-field-mapping.md`).
+
+Internally: launches a hidden Excel instance → `read_phpp()` → `BuildingRecord.from_reader_dict()` → `to_json()`. Takes roughly 21 seconds for a full PHPP workbook, all of it live in Excel — no cached-value staleness.
+
+### `phpp-tool write` — inject a JSON record into a blank template
+
+```bash
+phpp-tool write records/my_building.json Data/Empty.xlsx -o output.xlsx
+```
+
+- `RECORD_FILE` (positional) — the JSON produced by `read`.
+- `TEMPLATE` (positional) — the blank `.xlsx` to write into.
+- `-o, --output` (required) — path for the written workbook.
+- `--field-map` — same override as `read`.
+
+Internally: `model_validate_json()` → `model_dump(exclude_none=True)` → `write_phpp()`, which resolves addresses live in Excel, then persists values via `surgical_writer.py`'s ZIP/XML patch after Excel closes without saving (the macOS 26 AppleScript-save workaround, and the mechanism that preserves `<extLst>`/`<headerFooter>` content). Takes roughly 48 seconds.
+
+### `phpp-tool inspect-map` — audit field map coverage
+
+```bash
+phpp-tool inspect-map
+```
+
+Prints every mapped worksheet with its field/section/config counts. No arguments beyond the shared `--field-map` override. Use this after editing `phpp-field-mapping.md` to confirm the parser still finds everything.
+
+### `scripts/roundtrip.py` — end-to-end verification
+
+```bash
+python scripts/roundtrip.py Data/Example.xlsx Data/Empty.xlsx
+python scripts/roundtrip.py Data/Empty.xlsx Data/Empty.xlsx
+```
+
+Arguments come in `source template` pairs — pass more pairs on the same command line to run several roundtrips in one invocation (results print a combined summary at the end). Output artifacts land in `records/roundtrip_<timestamp>/`. Requires Excel throughout (read, address resolution, and the final openpyxl-based cell verification).
+
+| Phase | What runs |
+|-------|-----------|
+| 1 — Read inputs | `read_phpp(skip_formulas=True)` via xlwings |
+| 2 — Read all | `read_phpp(skip_formulas=False)` via xlwings — reports formula filter stats |
+| 3 — Write | xlwings address resolution + surgical XML persistence (`surgical_writer.py`) |
+| 4 — Verify | openpyxl reads the written file and checks every writer-reported cell |
+
+Unlike PHX_pyxl's roundtrip script, there is no separate "Part 2" Excel-cache-validation phase here — every read in this project already goes through live Excel, so there's no cache to validate against.
+
+### Running the test suite
+
+```bash
+pytest tests/ -v          # requires Excel, ~9s
+```
+
+### Quick reference
+
+| Task | Command |
+|------|---------|
+| Read a filled PHPP → JSON | `phpp-tool read Data/Example.xlsx -o records/my_building.json` |
+| Write JSON → blank PHPP | `phpp-tool write records/my_building.json Data/Empty.xlsx -o output.xlsx` |
+| Check field map coverage | `phpp-tool inspect-map` |
+| Roundtrip verification | `python scripts/roundtrip.py Data/Example.xlsx Data/Empty.xlsx` |
+| Unit tests | `pytest tests/ -v` |
+
+---
+
+## Part 3 — Routine-by-Routine Walkthrough
 
 ### `excel_app.py` — Excel application factory
 
@@ -197,9 +280,9 @@ Returns metadata from the Electricity sheet's appliance row specs without readin
 
 Finds the header row position via `find_row_in_col()` and returns `{"_header_row": row}`.
 
-### `writer.py` — Hybrid xlwings + openpyxl writer
+### `writer.py` — Hybrid xlwings address resolution + surgical XML writer
 
-**Strategy role:** Resolves cell addresses via xlwings (live Excel), collects all writes as tuples, then persists them via openpyxl after Excel closes.
+**Strategy role:** Resolves cell addresses via xlwings (live Excel), collects all writes as tuples, then hands them to `surgical_writer.apply_surgical_writes()` for persistence after Excel closes.
 
 #### Top level: `write_phpp()`
 
@@ -208,13 +291,13 @@ Finds the header row position via `find_row_in_col()` and returns `{"_header_row
 | 1 | Copy the template file to the output path. |
 | 2 | Launch Excel, open the copy, set calculation to manual (prevents recalculation during writes). |
 | 3 | Parse the field map. For each worksheet key in the record, find the matching sheet and call `_write_worksheet()`. |
-| 4 | Close the workbook, quit Excel. |
-| 5 | Call `_apply_writes_openpyxl()` to persist all collected writes. |
+| 4 | Close the workbook **without saving** (xlwings' `Book.close()` never saves), quit Excel — the on-disk copy remains byte-identical to the template. |
+| 5 | Call `surgical_writer.apply_surgical_writes(template_path, output_path, pending)` to persist all collected writes via ZIP/XML patch. |
 | 6 | Return the list of `(sheet_name, col, row, value)` writes for verification. |
 
-#### `_apply_writes_openpyxl()`
+#### `surgical_writer.py`
 
-Opens the .xlsx with openpyxl, iterates the pending writes list, sets each cell value, saves, and closes. This is the only step that modifies the file on disk.
+Same module as PHX_pyxl's — see its routine walkthrough there. Patches only the `<sheetData>` region of sheets with writes, via `lxml`, leaving `<extLst>`/`<headerFooter>`/everything else in the ZIP archive untouched. This is what actually modifies the file on disk; xlwings never saves.
 
 #### `_write_cell()`
 
@@ -274,7 +357,7 @@ Resolves the named range via xlwings to get its sheet, column, and row, then app
 
 ---
 
-## Part 3 — Usage, Roundtrip Philosophy, and Output Files
+## Part 4 — Usage, Roundtrip Philosophy, and Output Files
 
 ### Using the phpp_tool
 
@@ -296,9 +379,9 @@ The resulting JSON is organized by worksheet key. Each worksheet contains some c
 phpp-tool write records/my_building.json Data/Empty.xlsx -o output.xlsx
 ```
 
-The tool copies the template, opens the copy in a hidden Excel instance to resolve all cell addresses (label searches, named ranges, block start rows), collects writes, closes Excel, and persists the values via openpyxl. This takes roughly 48 seconds.
+The tool copies the template, opens the copy in a hidden Excel instance to resolve all cell addresses (label searches, named ranges, block start rows), collects writes, closes Excel without saving, and persists the values via `surgical_writer.py`'s ZIP/XML patch. This takes roughly 48 seconds (dominated by Excel launch and address resolution; persistence itself is fast).
 
-The output file is a valid .xlsx that contains all the designer's input values in the correct cells. However, because openpyxl's save strips some Excel extensions (data validation rules, custom headers/footers), the file cannot be reopened by Excel via AppleScript. It is usable as a data artifact and can be opened manually in Excel, but some PHPP features may be degraded.
+The output file is a valid .xlsx that contains all the designer's input values in the correct cells, with `<extLst>` extensions (Data Validation, etc.) and `<headerFooter>` content preserved byte-for-byte from the template — verified across all 83 sheets of a full roundtrip write. The file still cannot be reliably reopened by Excel via AppleScript automation on macOS 26 (a separate OS/Excel-version compatibility issue, unrelated to the write mechanism), but it is a faithful copy of the template with only the intended cell values changed.
 
 #### Inspecting the field map
 
@@ -407,7 +490,7 @@ Key characteristics:
 
 #### CLI output: written workbook (.xlsx)
 
-Produced by `phpp-tool write`. This is a copy of the blank template with input values injected at the addresses the writer resolved. Formulas remain intact as they were in the template. The file can be opened in Excel manually, though some PHPP data validation features may be degraded due to the openpyxl persistence step.
+Produced by `phpp-tool write`. This is a copy of the blank template with input values injected at the addresses the writer resolved. Formulas remain intact as they were in the template, and `<extLst>`/`<headerFooter>` content is preserved byte-for-byte since persistence goes through `surgical_writer.py`'s ZIP/XML patch rather than an openpyxl save. The file still cannot be reliably reopened by Excel via AppleScript automation on macOS 26 (a separate OS/Excel-version issue), but it can be opened manually in Excel with no degraded features.
 
 #### Roundtrip test artifacts
 
@@ -425,3 +508,75 @@ The test also prints a console report with:
 - Formula filter statistics (count and percentage removed)
 - Number of cell writes the writer performed
 - Cell-by-cell verification result (checked count, mismatch count, and details of any mismatches)
+
+---
+
+## Part 5 — Concerns, Features, and Limitations
+
+Lessons from building both PHX_xlwg and its sibling PHX_pyxl against the same field map, with xlwings and openpyxl respectively.
+
+### `phpp-field-mapping.md`
+
+**Features**
+
+- Single shared dictionary — both PHX_xlwg and PHX_pyxl read the exact same markdown file and get identical locator behavior, so the field map only needs maintaining once.
+- Human-readable and git-diffable — field map edits review like code changes, not like an opaque binary spreadsheet-to-spreadsheet mapping.
+- Six addressing strategies (label-anchored, header+entry block, named ranges, absolute address, column+row-offset, fixed result) cover PHPP's inconsistent per-sheet layout without needing sheet-specific code in the reader/writer.
+- `phpp-tool inspect-map` gives instant field/section/config coverage auditing after any field map edit.
+
+**Concerns / Limitations**
+
+- **SI/IP unit mismatch** — field map labels assume SI units (`[°C]`), but `Data/Empty.xlsx` uses IP units (`[°F]`), so some label-anchored locators silently fail to match. No fix is implemented; it would require IP-unit label variants or unit-suffix stripping during `norm()` matching.
+- **Depends on German internal Excel defined names** (e.g. `Werte_Klima_Region`) — fragile if a PHPP version localizes differently or renames internal ranges.
+- **Assumes a stable PHPP layout** — absolute-address and fixed-result strategies hardcode row/column numbers. A PHPP template revision that inserts or removes rows silently breaks these locators with no built-in detection or warning.
+- **Stale relative to test workbooks** — the label `"DHW circulation pipes or, for heat interface units, forward and return flows"` is defined in the map but not found in either test PHPP workbook, suggesting the map has drifted from the PHPP versions actually in use.
+- **Conflates inputs and outputs** — roughly 35% of mapped cells are formula results rather than designer inputs. The map doesn't declare which is which; that distinction is bolted on at runtime via the `skip_formulas` filter rather than being a property of the map itself.
+
+**Specific data-quality defects (verified 2026-07-01):**
+
+- **Malformed `phi_certification_class` row** (Verification, field-map line 21) — unescaped `|` characters inside the label and options text make this a non-standard markdown table row. It doesn't currently break anything: `map_parser.py`'s `_parse_label_row()` uses a state machine specifically hardened for this row (see its docstring), and the parsed `locator_string` — `"Class | Primary energy method"` — matches the real label text in `Verification SI!T13`. Still, it's fragile: any future change to the label-row parser that doesn't account for embedded pipes would silently break this field.
+- **`energy_unit: KHW` typo** (SolarDHW config, field-map line 680) — should be `KWH`, as used everywhere else including the structurally identical PV config block two sections later. Confirmed harmless: `energy_unit`/`footprint_unit` are never read by any Python module — they're descriptive metadata only, not consumed by the reader, writer, or models.
+- **Climate `ud_block` header locator is broken** (field-map line 98) — reads `Header locator: col `Name of location`, string `""`` — the column and search-string values are swapped (should be a real column letter paired with the search text `"Name of location"`). Traced end-to-end: with no `entry_locator` present, `_read_section()`'s dispatch logic misroutes this section to `_read_items_section()` instead of a block/column reader. Confirmed by running `read_phpp()` against `Data/Empty.xlsx`: `CLIMATE.ud_block` resolves to `null` — the section is silently non-functional, and neither project reads nor writes user-defined climate data rows today.
+- **Duplicate target cells — one confirmed intentional, one still a genuine bug.** `psi_g_left`/`psi_g_right`/`psi_g_bottom`/`psi_g_top` (Windows → frames, lines 290–293) all mapping to column `IR` is **documented as intentional** in `PHX_Dev/CLAUDE.md` — the original prototype's planning doc — since PHPP treats the glazing-edge (spacer) thermal bridge as one uniform value per window, unlike the installation thermal bridge (`psi_i`), which genuinely varies by side. `duct_assign_1`–`8` (Ventilation, lines 477–484) mapping sequentially to columns Q–X, then `duct_assign_9`/`_10` (lines 485–486) both jumping to `Z` (skipping `Y`) has no such documented rationale and remains a genuine copy-paste-style defect — every duct row silently loses whatever distinct value actually lives in column `Y`.
+
+**Structural concerns affecting efficiency/correctness (verified 2026-07-01):**
+
+- **Config value type is inferred from string shape, not declared — and this already misfires.** `classify_item()` decides whether a config value is a cell address, a named range, or a literal config value by pattern-matching the value itself (`_CELL_REF_RE = ^[A-Z]{1,3}\d+$`), with no explicit type tag anywhere in the markdown. `footprint_unit: M2` (SolarDHW and PV config blocks) happens to match that address pattern, so it's silently resolved as cell `M2` on those sheets instead of kept as the literal string `"M2"`. Confirmed via `read_phpp()` against `Data/Empty.xlsx`: both `SOLAR_DHW.footprint_unit` and `SOLAR_PV.footprint_unit` come back `null`. This isn't limited to these two fields — any future config value shaped like `<1-3 letters><digits>` (a unit code, an ID) will silently misresolve the same way. Fixing it structurally (an explicit type marker in the map, rather than shape-based inference) would remove this whole class of risk.
+- **`UVALUES` and `EASY_PH` are dead worksheet entries.** Their `sheet_name` values (`"U-Values"`, `"easyPH"`) don't match any real sheet in either test workbook — the actual sheets are `"U-values SI"`/`"R-Values"` (different capitalization and naming scheme entirely), and there's no `easyPH` tab at all in PHPP 10.6. Both are silently skipped on every read and write (an INFO-level log line easy to miss in normal output). The commonly quoted "31 mapped worksheets" figure is optimistic — at least 2 of them currently do nothing.
+- **The `options` enum metadata is mostly inert.** Label-anchored fields like `phi_building_category_type` carry detailed value-code documentation (e.g. `10`: 10-Passive house), but the only runtime consumer of the parsed `options` dict is the appliance-rows stub reader, which just echoes it back as metadata. Reader, writer, and `models.py` never validate a read value against its documented options or translate codes↔labels. It's real domain knowledge that costs upkeep but buys no runtime behavior in the vast majority of fields that carry it.
+- **Minor: the field map is re-parsed from scratch on every call.** `parse_field_map()` has no caching, so `read_phpp()`, `write_phpp()`, and `inspect-map` each parse the same ~922-line markdown file independently; `roundtrip.py` triggers three separate parses per single run (Phases 1, 2, and 3). Negligible today against ~20–30s of workbook I/O, but worth caching or sharing a parsed map if the CLI/scripts are ever restructured to chain multiple operations.
+
+**Additional structural concerns (verified 2026-07-01, second pass):**
+
+- **`ADDNL_VENT` is silently dropped in its entirety under the default `skip_formulas=True` mode — the most severe defect found to date.** Traced end-to-end: `resolve_block()`'s sparse-row heuristic (`locators.py`) discards a row if it has no string value and very few non-`None` fields — a check meant to detect genuinely blank template rows. But under `skip_formulas=True`, formula-driven fields like `display_name` and calculated area/flow values get nulled out first, which trips this same heuristic on real, populated room rows. Two levels up, both `_read_worksheet()` and `read_phpp()` use bare `if result:` truthiness checks, so an empty list/dict from the tripped heuristic causes the entire worksheet key to be omitted rather than emitted as `[]`. Confirmed via the actual CLI: `phpp-tool read Data/Example.xlsx` produces JSON with no `ADDNL_VENT` key at all — real project data (room names like `"childrens 1"`, `"elementary 1"`, and every duct/unit assignment, including the already-documented `duct_assign_9`/`_10` duplicate-column fields) never reaches the output under normal use. This is materially worse than data being wrong — it's an entire worksheet's data vanishing with no error or warning.
+- **`entry_row_start`, when present, silently overrides the discovered entry-locator row with no cross-check.** The `tanks` section (SolarDHW/DHW+Distribution) specifies both an `Entry locator: col J, string "Storage type 1"` *and* an explicit `entry_row_start: 191`. Confirmed the label actually sits at row 189 — two rows off from the hardcoded number — and `locators.py`'s `resolve_block()` (`if entry_row_start is not None: start_row = entry_row_start`) always takes the hardcoded value unconditionally, never validating it against where the label was actually found. If the label ever shifts in a future template revision, this silently reads the wrong rows with zero indication of failure.
+
+### xlwings
+
+**Features**
+
+- Drives a live Excel instance — formulas always recalculate, so reads never suffer from cached-value staleness the way a pure-openpyxl read can.
+- No file-format degradation during read or address resolution — Excel serializes its own file, so charts, drawings, and data validations survive untouched while xlwings is just locating cells.
+- Batch reads (`find_row_in_col()`, `resolve_block()`) fetch an entire column or region in a single AppleScript call rather than cell-by-cell, mitigating per-call RPC latency.
+- The write path resolves addresses with the exact same locator code and live data as the read path, so label searches, named ranges, and entry-row detection behave identically in both directions.
+
+**Concerns / Limitations**
+
+- **Hard Excel dependency for every operation** — read, the write path's address-resolution phase, and the entire test suite (~9s) all require a running Excel instance; there is no headless or CI-friendly mode. This is exactly the constraint PHX_pyxl was built to eliminate.
+- **macOS 26 broke every native AppleScript save path** for large workbooks: `wb.save()` returns error -50, `close(saving=yes)` hangs indefinitely, and even a VBA `ActiveWorkbook.Save` macro errors -50. Small test fixtures save fine; production-size PHPP workbooks do not. This is why the writer can't be pure xlwings — it must resolve addresses live, then quit Excel and persist via `surgical_writer.py` instead.
+- ~~**The file-integrity advantage only covers the read side**~~ — **No longer true as of 2026-07-01.** Persistence used to go through openpyxl's `save()`, which inherited openpyxl's extension-dropping behavior regardless of how cleanly xlwings resolved the addresses. Now that persistence goes through `surgical_writer.py`'s ZIP/XML patch instead, the file-integrity advantage covers both the read/resolution side (Excel never touches the file format) and the write side (the patch never invokes openpyxl's serializer).
+- **Slower per operation** — Excel process launch and AppleScript RPC overhead make reads (~21s) and writes (~48s) noticeably slower than the openpyxl-only equivalents (~20s / ~30s) in PHX_pyxl.
+- **Operational fragility** — transient AppleScript error -50 on rapid open/close cycles (mitigated with a one-retry-after-delay in `open_book()`), alert dialogs that must be suppressed, and Excel processes that can be left running if a script exits abnormally.
+
+### openpyxl
+
+**Features**
+
+- No Excel needed for locator resolution or the roundtrip test's final verification step — reading the written file back with openpyxl to confirm every writer-reported write actually landed at the correct cell.
+- Keeps the address-resolution half of the writer small — because persistence now lives entirely in `surgical_writer.py`, `writer.py` itself only ever collects a pending list of `(sheet, col, row, value)` tuples; ~290 lines, versus ~770 lines in the original all-openpyxl PHX_Dev prototype that traced and rewrote formula chains directly.
+
+**Concerns / Limitations**
+
+- ~~**Used to drop content on save, via two distinct mechanisms, even though addresses were resolved live in Excel moments earlier**~~ — **Fixed 2026-07-01.** This applied when persistence went through openpyxl's `save()`: (1) `parse_extensions()` unconditionally discards any of 8 GUID-tagged `<extLst>` extension types it recognizes — Conditional Formatting, Data Validation, Sparkline Group, Slicer List, Protected Range, Ignored Error, Web Extension, Timeline Ref (`openpyxl/xml/constants.py:EXT_TYPES`) — of which only **Data Validation** was confirmed to fire on `Example.xlsx`/`Empty.xlsx`. (2) `header_footer.py`'s `_split_string()` silently blanks all three header/footer sections when PHPP's actual string doesn't match its `&L...&C...&R...` pattern. The hybrid writer now persists via `surgical_writer.py`'s ZIP/XML patch instead of openpyxl's `save()`, touching only the `<sheetData>` region of affected sheets. Verified byte-for-byte: `<extLst>` and `<headerFooter>` regions are identical between template and written output across all 83 sheets of a full 13,102-cell roundtrip write — the file-integrity advantage now genuinely covers both the resolution *and* the persistence side.
+- **No recalculation** — the written file's formula results won't refresh until it is manually opened and saved in Excel, the same manual-step requirement PHX_pyxl documents for its `verify_excel.py` full-fidelity check.
+- **Written files generally can't be reliably reopened by Excel via AppleScript** afterward (validation-error hangs) — this is unrelated to file integrity (the content itself is intact and complete, verified byte-for-byte), but it does mean the pipeline can't fully automate a round trip through live Excel; opening the output requires a manual step.

@@ -1,10 +1,14 @@
-"""Write a building record into a PHPP workbook via xlwings + openpyxl.
+"""Write a building record into a PHPP workbook via xlwings + surgical XML.
 
 xlwings opens the workbook in a live Excel instance to resolve locator
 lookups (label searches, named ranges, entry-row detection). Cell values
 are NOT saved via Excel — on macOS 26, all AppleScript save paths hang
-on large workbooks. Instead, writes are collected during the xlwings pass
-and then persisted to the .xlsx file via openpyxl after Excel closes.
+on large workbooks. Writes are collected during the xlwings pass, Excel
+closes without saving (so the on-disk copy stays byte-identical to the
+template), and then `surgical_writer.apply_surgical_writes()` persists the
+writes by editing the .xlsx as a ZIP archive rather than going through
+openpyxl's load->save cycle. This preserves <extLst> extensions (e.g. Data
+Validation) and <headerFooter> content that an openpyxl save would drop.
 """
 
 from __future__ import annotations
@@ -19,7 +23,6 @@ import xlwings as xw
 from phpp_tool.excel_app import excel_app, is_shared, open_book
 from phpp_tool.locators import (
     classify_item,
-    col_to_idx,
     field_col,
     find_row_in_col,
     is_entry_row_header,
@@ -27,6 +30,7 @@ from phpp_tool.locators import (
     prefer_si_sheet,
 )
 from phpp_tool.map_parser import parse_field_map
+from phpp_tool.surgical_writer import apply_surgical_writes
 
 logger = logging.getLogger(__name__)
 
@@ -78,24 +82,9 @@ def write_phpp(
         if not is_shared(app):
             app.quit()
 
-    _apply_writes_openpyxl(output_path, pending)
+    apply_surgical_writes(template_path, output_path, pending)
     logger.info("Wrote %d cell values", total_writes)
     return pending
-
-
-def _apply_writes_openpyxl(
-    path: Path,
-    writes: list[tuple[str, str, int, Any]],
-) -> None:
-    """Persist collected cell writes into the .xlsx via openpyxl."""
-    if not writes:
-        return
-    from openpyxl import load_workbook
-    wb = load_workbook(str(path))
-    for sheet_name, col, row, value in writes:
-        wb[sheet_name].cell(row=row, column=col_to_idx(col), value=value)
-    wb.save(str(path))
-    wb.close()
 
 
 # ======================================================================
