@@ -15,10 +15,8 @@ import xlwings as xw
 
 from phpp_tool.excel_app import excel_app, is_shared, open_book
 from phpp_tool.locators import (
-    classify_item,
     field_col,
     find_row_in_col,
-    prefer_si_sheet,
     resolve_absolute,
     resolve_block,
     resolve_fixed,
@@ -51,10 +49,10 @@ def read_phpp(
         result: dict[str, Any] = {}
 
         for ws_key, ws_spec in field_map.items():
-            sheet_name = prefer_si_sheet(ws_spec["sheet_name"], sheet_names)
+            sheet_name = ws_spec["sheet_name"]
             if sheet_name not in sheet_names:
-                logger.info("Sheet %r not found, skipping %s",
-                            sheet_name, ws_key)
+                logger.warning("Sheet %r not found, skipping %s",
+                               sheet_name, ws_key)
                 continue
             ws = wb.sheets[sheet_name]
             ws_result = _read_worksheet(ws, wb, ws_spec,
@@ -85,7 +83,8 @@ def _read_worksheet(
 
     if ws_spec.get("config"):
         config_resolved = _read_config(
-            ws, wb, ws_spec["config"], skip_formulas=skip_formulas)
+            ws, wb, ws_spec["config"], ws_spec.get("config_kind", {}),
+            skip_formulas=skip_formulas)
         if config_resolved:
             ws_result["_config"] = config_resolved
 
@@ -95,6 +94,14 @@ def _read_worksheet(
             skip_formulas=skip_formulas)
         if sec_result:
             ws_result[sec_name] = sec_result
+
+    has_mapped_content = bool(
+        ws_spec.get("fields") or ws_spec.get("config") or ws_spec.get("sections"))
+    if has_mapped_content and not ws_result:
+        logger.warning(
+            "Worksheet %r has mapped fields/sections but resolved to no "
+            "data at all -- check locators and skip_formulas interaction",
+            ws.name)
 
     return ws_result
 
@@ -129,11 +136,12 @@ def _read_label_anchored_fields(
 
 def _read_config(
     ws: xw.Sheet, wb: xw.Book, config: dict[str, Any],
+    config_kind: dict[str, str],
     *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in config.items():
-        kind = classify_item(key, value)
+        kind = config_kind.get(key, "literal")
         if kind == "address":
             result[key] = resolve_absolute(ws, value,
                                            skip_formulas=skip_formulas)
@@ -167,8 +175,9 @@ def _read_section(
     has_appliance = "appliance_rows" in sec_spec
 
     items = sec_spec.get("items", {})
-    entry_row_start = items.get(
-        "entry_row_start") or items.get("entry_start_row")
+    entry_row_start = (items.get("entry_row_start")
+                       or items.get("entry_start_row")
+                       or items.get("start_row"))
     sf = skip_formulas
 
     if has_header and has_entry and has_row_fields and not has_col_fields:
@@ -182,10 +191,15 @@ def _read_section(
     if has_col_fields and not has_header:
         return _read_static_column_section(ws, sec_spec, entry_row_start,
                                            skip_formulas=sf)
+    if has_col_fields and entry_row_start is not None:
+        return _read_block_section(ws, sec_spec, entry_row_start,
+                                   skip_formulas=sf)
     if has_appliance:
         return _read_appliance_section(ws, sec_spec)
     if has_items:
-        return _read_items_section(ws, wb, items, skip_formulas=sf)
+        return _read_items_section(ws, wb, items,
+                                   sec_spec.get("items_kind", {}),
+                                   skip_formulas=sf)
     if has_fields:
         return _read_label_anchored_fields(ws, sec_spec["fields"],
                                            skip_formulas=sf)
@@ -296,6 +310,7 @@ def _read_static_column_section(
 
 def _read_items_section(
     ws: xw.Sheet, wb: xw.Book, items: dict[str, Any],
+    items_kind: dict[str, str],
     *, skip_formulas: bool = True,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -308,7 +323,7 @@ def _read_items_section(
             else:
                 result[key] = value
         else:
-            kind = classify_item(key, value)
+            kind = items_kind.get(key, "literal")
             if kind == "address":
                 result[key] = resolve_absolute(ws, value,
                                                skip_formulas=skip_formulas)
