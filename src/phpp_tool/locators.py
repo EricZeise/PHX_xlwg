@@ -46,6 +46,23 @@ def col_to_idx(col: str) -> int:
     return result
 
 
+def resolve_sheet_name(sheet_name: str, sheet_names: list[str]) -> str | None:
+    """Case-insensitively resolve *sheet_name* against real workbook sheets.
+
+    Excel doesn't allow two sheets to coexist with names differing only by
+    case, so matching case-insensitively is always safe -- it can't
+    introduce ambiguity between two distinct real sheets. Returns the
+    actual, correctly-cased name (needed for exact-case downstream lookups
+    like ``wb.sheets[name]``), or None if no sheet matches even
+    case-insensitively.
+    """
+    target = sheet_name.casefold()
+    for name in sheet_names:
+        if name.casefold() == target:
+            return name
+    return None
+
+
 def field_col(spec: str | dict) -> str:
     """Extract column letter from a field spec (string or dict with 'column')."""
     return spec if isinstance(spec, str) else spec.get("column", "A")
@@ -73,13 +90,70 @@ def cell_value(
     return rng.value
 
 
+_BATCH_CHUNK_SIZE = 50
+
+
+def _read_rect_chunked(
+    ws: xw.Sheet, min_col: int, max_col: int, start_row: int, end_row: int,
+    *, attr: str = "value",
+) -> list[list[Any]]:
+    """Read a rectangular region (all rows, min_col..max_col), row-chunked.
+
+    xlwings' Mac AppleScript backend can silently drop a row's worth of
+    values from a batch ``.value``/``.formula`` read when the range
+    crosses certain hidden/grouped-row boundaries (confirmed empirically:
+    requesting N rows sometimes returns N-1 values with no error),
+    desynchronizing row-index arithmetic for every row after the drop.
+    Reading in small chunks and validating each chunk's returned length
+    against the expected row count catches this; any chunk that doesn't
+    validate falls back to a per-row read for just that chunk, so the
+    result stays correct without paying the per-row cost everywhere.
+    """
+    if start_row > end_row:
+        return []
+    rows: list[list[Any]] = []
+    row = start_row
+    while row <= end_row:
+        chunk_end = min(row + _BATCH_CHUNK_SIZE - 1, end_row)
+        expected_len = chunk_end - row + 1
+        raw = getattr(ws.range((row, min_col), (chunk_end, max_col)), attr)
+        if raw is None:
+            # A fully empty/no-formula chunk -- preserve row count with
+            # None-filled rows rather than dropping rows, so this chunk
+            # still lines up 1:1 with a parallel value/formula read over
+            # the same row range.
+            raw = [[None] * (max_col - min_col + 1) for _ in range(expected_len)]
+        elif not isinstance(raw, list):
+            raw = [[raw]]
+        elif not isinstance(raw[0], list):
+            # xlwings returns a flat list for single-row OR single-column
+            # ranges -- disambiguate before checking chunk length.
+            raw = [[v] for v in raw] if min_col == max_col else [raw]
+
+        if len(raw) != expected_len:
+            logger.debug(
+                "Batch %s read for cols %d-%d rows %d-%d returned %d rows, "
+                "expected %d -- falling back to per-row read for this chunk",
+                attr, min_col, max_col, row, chunk_end, len(raw), expected_len,
+            )
+            raw = []
+            for r in range(row, chunk_end + 1):
+                one = getattr(ws.range((r, min_col), (r, max_col)), attr)
+                raw.append(one if isinstance(one, list) else [one])
+
+        rows.extend(raw)
+        row = chunk_end + 1
+    return rows
+
+
 def find_row_in_col(
     ws: xw.Sheet, col: str, needle: str, *,
     contains: bool = True, start_from: int = 1,
 ) -> int | None:
     """Return the first row where ``col``'s cell text matches *needle*.
 
-    Reads the entire column in one AppleScript call for performance.
+    Reads the column in row-chunks for performance (see
+    _read_rect_chunked for why a single unchunked batch read isn't safe).
     """
     needle_n = norm(needle)
     if not needle_n:
@@ -88,13 +162,9 @@ def find_row_in_col(
     last_row = ws.used_range.last_cell.row
     if start_from > last_row:
         return None
-    values = ws.range((start_from, col_idx), (last_row, col_idx)).value
-    if values is None:
-        return None
-    if not isinstance(values, list):
-        values = [values]
-    for i, cell_val in enumerate(values):
-        cell_n = norm(cell_val)
+    rows = _read_rect_chunked(ws, col_idx, col_idx, start_from, last_row)
+    for i, row_vals in enumerate(rows):
+        cell_n = norm(row_vals[0])
         if not cell_n:
             continue
         if contains:
@@ -134,6 +204,21 @@ def is_entry_row_header(
 # ---------------------------------------------------------------------------
 # Strategy 1: Label-anchored relative
 # ---------------------------------------------------------------------------
+
+def is_label_anchored_formula(
+    ws: xw.Sheet, locator_col: str, locator_string: str, input_col: str,
+    row_offset: int = 0,
+) -> bool | None:
+    """Return whether a label-anchored field's target cell is a formula.
+
+    Returns None if the label can't be found (caller should skip the
+    input/output cross-check rather than treat this as a mismatch).
+    """
+    row = find_row_in_col(ws, locator_col, locator_string)
+    if row is None:
+        return None
+    return is_formula(ws, input_col, row + row_offset)
+
 
 def resolve_label_anchored(
     ws: xw.Sheet,
@@ -187,30 +272,57 @@ def resolve_block(
         # feeding a bogus column letter to col_to_idx().
         entry_col = "A"
 
-    if entry_row_start is not None:
-        start_row = entry_row_start
-    else:
-        entry_string = entry_locator.get("string", "")
+    entry_string = entry_locator.get("string", "")
+
+    def _discover_start_row() -> tuple[int | None, bool]:
+        """Find the entry row by searching for the header + entry label.
+
+        Returns (start_row, header_found) -- header_found distinguishes
+        "header missing" from "entry label missing" for warning purposes.
+        """
         if not entry_string:
-            return []
+            return None, False
         hdr_row = find_row_in_col(
             ws, header_locator["col"], header_locator["string"]
         )
         if hdr_row is None:
-            logger.warning(
-                "Block header %r not found in column %s",
-                header_locator["string"], header_locator["col"],
-            )
-            return []
+            return None, False
         start_row_found = find_row_in_col(
             ws, entry_col, entry_string, start_from=hdr_row,
         )
         if start_row_found is None:
-            return []
+            return None, True
         if is_entry_row_header(ws, start_row_found, column_fields):
-            start_row = max(start_row_found + 1, hdr_row)
-        else:
-            start_row = max(start_row_found, hdr_row)
+            return max(start_row_found + 1, hdr_row), True
+        return max(start_row_found, hdr_row), True
+
+    if entry_row_start is not None:
+        start_row = entry_row_start
+        # entry_row_start always wins (it's the authoritative override), but
+        # cross-check it against the discoverable label position -- if the
+        # two disagree, that's a sign the hardcoded row has drifted from the
+        # workbook's actual layout, so surface it instead of staying silent.
+        if entry_string:
+            discovered, _ = _discover_start_row()
+            if discovered is not None and discovered != entry_row_start:
+                logger.warning(
+                    "entry_row_start=%d for entry label %r in sheet %r "
+                    "disagrees with the discovered row %d -- using "
+                    "entry_row_start, but the field map may be stale",
+                    entry_row_start, entry_string, ws.name, discovered,
+                )
+    else:
+        if not entry_string:
+            return []
+        discovered, header_found = _discover_start_row()
+        if discovered is None:
+            if not header_found:
+                logger.warning(
+                    "Block header %r not found in column %s",
+                    header_locator["string"], header_locator["col"],
+                )
+            return []
+        start_row = discovered
 
     last_row = ws.used_range.last_cell.row
     if start_row > last_row:
@@ -224,33 +336,18 @@ def resolve_block(
     min_col = min(all_col_idxs)
     max_col = max(all_col_idxs)
 
-    # One AppleScript call: read the entire rectangular region
-    rng = ws.range((start_row, min_col), (last_row, max_col))
-    raw = rng.value
-    if raw is None:
+    # Read the rectangular region in row-chunks (see _read_rect_chunked --
+    # a single unchunked batch read can silently drop rows across hidden
+    # row boundaries, desynchronizing row-index arithmetic below).
+    raw = _read_rect_chunked(ws, min_col, max_col, start_row, last_row)
+    if not raw:
         return []
-    # xlwings returns flat list for single-row OR single-column ranges
-    if not isinstance(raw, list):
-        raw = [[raw]]
-    elif not isinstance(raw[0], list):
-        if min_col == max_col:
-            raw = [[v] for v in raw]
-        else:
-            raw = [raw]
 
     # Optional: batch-read formulas to filter out formula cells
     formula_mask = None
     if skip_formulas:
-        raw_f = rng.formula
-        if raw_f is not None:
-            if not isinstance(raw_f, list):
-                raw_f = [[raw_f]]
-            elif not isinstance(raw_f[0], list):
-                if min_col == max_col:
-                    raw_f = [[v] for v in raw_f]
-                else:
-                    raw_f = [raw_f]
-            formula_mask = raw_f
+        formula_mask = _read_rect_chunked(
+            ws, min_col, max_col, start_row, last_row, attr="formula")
 
     entry_offset = entry_col_idx - min_col
     field_offsets = [idx - min_col for idx in field_col_idxs]
