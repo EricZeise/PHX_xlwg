@@ -401,7 +401,21 @@ def _write_named_range(
         rng = wb.names[name].refers_to_range
         from openpyxl.utils import get_column_letter
         col_letter = get_column_letter(rng.column)
-        pending.append((rng.sheet.name, col_letter, rng.row, value))
+        title = rng.sheet.name
+        if title.lower().endswith(" si"):
+            # Excel's own defined-name table points several German named
+            # ranges (e.g. Klima_Region, Klima_Standort) at a "<Name> SI"
+            # mirror cell that's a passthrough formula, not the real input
+            # cell -- writing there would just get refused by
+            # surgical_writer's formula-cell protection. Redirect to the
+            # base tab's same coordinate instead, mirroring the read-side
+            # fix in locators.py's resolve_named_range /
+            # _resolve_si_mirror_passthrough.
+            base_title = resolve_sheet_name(
+                title[: -len(" SI")], [s.name for s in wb.sheets])
+            if base_title is not None:
+                title = base_title
+        pending.append((title, col_letter, rng.row, value))
         return True
     except (KeyError, AttributeError):
         logger.warning("Named range %r not found for write", name)
