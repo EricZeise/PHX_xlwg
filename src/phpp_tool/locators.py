@@ -63,9 +63,34 @@ def resolve_sheet_name(sheet_name: str, sheet_names: list[str]) -> str | None:
     return None
 
 
+def base_sheet_for_si_mirror(title: str, sheet_names: list[str]) -> str | None:
+    """Return the base-tab name for a "<Name> SI"-suffixed sheet, or None.
+
+    Returns None if *title* doesn't end in " SI" (case-insensitive) or no
+    matching base sheet exists in *sheet_names*. Shared by the read-side
+    SI-mirror-passthrough fallback and the write-side named-range redirect
+    (both need to answer "what's the base tab for this SI sheet?").
+    """
+    if not title.lower().endswith(" si"):
+        return None
+    return resolve_sheet_name(title[: -len(" SI")], sheet_names)
+
+
 def field_col(spec: str | dict) -> str:
     """Extract column letter from a field spec (string or dict with 'column')."""
     return spec if isinstance(spec, str) else spec.get("column", "A")
+
+
+def field_row_offset(spec: dict) -> int:
+    """Extract a row offset from a field spec: 'row_offset', else 'row', else 0."""
+    return spec.get("row_offset", spec.get("row", 0))
+
+
+def resolve_entry_row_start(items: dict) -> int | None:
+    """Look up a block's entry-start row from any of its recognized key aliases."""
+    return (items.get("entry_row_start")
+            or items.get("entry_start_row")
+            or items.get("start_row"))
 
 
 def is_formula(ws: xw.Sheet, col: str, row: int) -> bool:
@@ -453,11 +478,8 @@ def _resolve_si_mirror_passthrough(wb: xw.Book, rng: xw.Range) -> Any:
     formula; otherwise returns _NOT_FOUND so the caller keeps its existing
     behavior.
     """
-    title = rng.sheet.name
-    if not title.lower().endswith(" si"):
-        return _NOT_FOUND
-    base_title = resolve_sheet_name(
-        title[: -len(" SI")], [s.name for s in wb.sheets])
+    base_title = base_sheet_for_si_mirror(
+        rng.sheet.name, [s.name for s in wb.sheets])
     if base_title is None:
         return _NOT_FOUND
     base_rng = wb.sheets[base_title].range(rng.address)
@@ -502,12 +524,8 @@ def resolve_absolute(
     ws: xw.Sheet, address: str, *, skip_formulas: bool = False,
 ) -> Any:
     """Return the value at a fixed cell reference like 'C11'."""
-    rng = ws.range(address)
-    if skip_formulas:
-        f = rng.formula
-        if isinstance(f, str) and f.startswith("="):
-            return None
-    return rng.value
+    col, row = parse_cell_ref(address)
+    return cell_value(ws, col, row, skip_formulas=skip_formulas)
 
 
 # ---------------------------------------------------------------------------

@@ -19,13 +19,17 @@ from pathlib import Path
 from typing import Any
 
 import xlwings as xw
+from openpyxl.utils import get_column_letter
 
 from phpp_tool.excel_app import excel_app, is_shared, open_book
 from phpp_tool.locators import (
+    base_sheet_for_si_mirror,
     field_col,
+    field_row_offset,
     find_row_in_col,
     is_entry_row_header,
     parse_cell_ref,
+    resolve_entry_row_start,
     resolve_sheet_name,
 )
 from phpp_tool.map_parser import parse_field_map
@@ -185,9 +189,7 @@ def _write_section(
     has_fields = "fields" in sec_spec
 
     items = sec_spec.get("items", {})
-    entry_row_start = (items.get("entry_row_start")
-                       or items.get("entry_start_row")
-                       or items.get("start_row"))
+    entry_row_start = resolve_entry_row_start(items)
 
     if has_header and has_entry and has_row_fields and not has_col_fields:
         return _write_row_offset(ws, sec_spec, sec_data, pending)
@@ -288,7 +290,7 @@ def _write_row_offset(
         value = data.get(field_name)
         if value is None:
             continue
-        offset = field_spec.get("row_offset", field_spec.get("row", 0))
+        offset = field_row_offset(field_spec)
         if _write_cell(ws, input_col, anchor_row + offset, value, pending):
             count += 1
     return count
@@ -323,7 +325,7 @@ def _write_column_row(
             value = entity_data.get(field_name)
             if value is None:
                 continue
-            offset = field_spec.get("row_offset", field_spec.get("row", 0))
+            offset = field_row_offset(field_spec)
             if _write_cell(ws, col_letter, entry_row_start + offset, value,
                            pending):
                 count += 1
@@ -399,22 +401,17 @@ def _write_named_range(
         return False
     try:
         rng = wb.names[name].refers_to_range
-        from openpyxl.utils import get_column_letter
         col_letter = get_column_letter(rng.column)
+        # Excel's own defined-name table points several German named ranges
+        # (e.g. Klima_Region, Klima_Standort) at a "<Name> SI" mirror cell
+        # that's a passthrough formula, not the real input cell -- writing
+        # there would just get refused by surgical_writer's formula-cell
+        # protection. Redirect to the base tab's same coordinate instead,
+        # mirroring the read-side fix in locators.py's resolve_named_range.
         title = rng.sheet.name
-        if title.lower().endswith(" si"):
-            # Excel's own defined-name table points several German named
-            # ranges (e.g. Klima_Region, Klima_Standort) at a "<Name> SI"
-            # mirror cell that's a passthrough formula, not the real input
-            # cell -- writing there would just get refused by
-            # surgical_writer's formula-cell protection. Redirect to the
-            # base tab's same coordinate instead, mirroring the read-side
-            # fix in locators.py's resolve_named_range /
-            # _resolve_si_mirror_passthrough.
-            base_title = resolve_sheet_name(
-                title[: -len(" SI")], [s.name for s in wb.sheets])
-            if base_title is not None:
-                title = base_title
+        base_title = base_sheet_for_si_mirror(title, [s.name for s in wb.sheets])
+        if base_title is not None:
+            title = base_title
         pending.append((title, col_letter, rng.row, value))
         return True
     except (KeyError, AttributeError):
