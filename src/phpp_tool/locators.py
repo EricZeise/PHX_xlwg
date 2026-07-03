@@ -473,6 +473,14 @@ def resolve_named_range(
     """Resolve a German Excel defined name to its value."""
     try:
         rng = wb.names[name].refers_to_range
+        if rng.shape != (1, 1):
+            # Multi-cell destination -- PHPP defines several device-type-
+            # name ranges broader than the single value they hold (e.g.
+            # Kuehlgeraete_Kompressor_Umluft_Geraet -> K37:R37, every cell
+            # blank except K37). Resolve to the top-left cell instead of
+            # returning the whole nested-list .value/.formula, matching the
+            # openpyxl-backend fix in PHX_pyxl.
+            rng = rng[0, 0]
         if skip_formulas:
             f = rng.formula
             if isinstance(f, str) and f.startswith("="):
