@@ -65,30 +65,51 @@ python3.13 -m venv .venv
 ### `phpp-tool read` — extract a filled workbook to JSON
 
 ```bash
-phpp-tool read Data/Example_IP.xlsx -o records/my_building.json
+phpp-tool read WORKBOOK -o OUTPUT [--phpp-version PHPP_VERSION] [--field-map FIELD_MAP]
 ```
 
-- `WORKBOOK` (positional) — path to the filled `.xlsx` to read.
-- `-o, --output` — JSON output path (omit to print to stdout).
-- `--phpp-version` — resolves `phpp-field-mapping/<version>.md` (default `EN_10_6_IP`). Use `EN_10_6_SI` for a genuinely SI-native single-shell workbook.
-- `--field-map` — direct-path override, bypassing `--phpp-version` entirely.
+- `WORKBOOK` (positional, required) — path to the filled `.xlsx` to read.
+- `-o, --output OUTPUT` — JSON output path (omit to print to stdout).
+- `--phpp-version PHPP_VERSION` — resolves `phpp-field-mapping/<version>.md` (default `EN_10_6_IP`). Use `EN_10_6_SI` for a genuinely SI-native single-shell workbook.
+- `--field-map FIELD_MAP` — direct-path override, bypassing `--phpp-version` entirely.
+
+Example:
+
+```bash
+phpp-tool read Data/Example_IP.xlsx -o records/my_building.json
+```
 
 Internally: launches a hidden Excel instance → `read_phpp()` → `BuildingRecord.from_reader_dict()` → `to_json()`, then stamps the output JSON with `_phpp_version`. Takes roughly 21 seconds for a full PHPP workbook, all of it live in Excel — no cached-value staleness.
 
 ### `phpp-tool write` — inject a JSON record into a blank template
 
 ```bash
-phpp-tool write records/my_building.json Data/Empty_IP.xlsx -o output.xlsx
+phpp-tool write RECORD_FILE TEMPLATE -o OUTPUT [--phpp-version PHPP_VERSION] [--field-map FIELD_MAP]
 ```
 
-- `RECORD_FILE` (positional) — the JSON produced by `read`.
-- `TEMPLATE` (positional) — the blank `.xlsx` to write into.
-- `-o, --output` (required) — path for the written workbook.
-- `--phpp-version` / `--field-map` — same as `read`. **Must match the version the record was read with** — `write` compares `--phpp-version` against the record's stamped `_phpp_version` and prints a warning (not a hard error) on mismatch.
+- `RECORD_FILE` (positional, required) — the JSON produced by `read`.
+- `TEMPLATE` (positional, required) — the blank `.xlsx` to write into.
+- `-o, --output OUTPUT` (required) — path for the written workbook.
+- `--phpp-version PHPP_VERSION` / `--field-map FIELD_MAP` — same as `read`. **Must match the version the record was read with** — `write` compares `--phpp-version` against the record's stamped `_phpp_version` and prints a warning (not a hard error) on mismatch.
+
+Example:
+
+```bash
+phpp-tool write records/my_building.json Data/Empty_IP.xlsx -o output.xlsx
+```
 
 Internally: `model_validate_json()` → `model_dump(exclude_none=True)` → `write_phpp()`, which resolves addresses live in Excel, then persists values via `surgical_writer.py`'s ZIP/XML patch after Excel closes without saving (the macOS 26 AppleScript-save workaround, and the mechanism that preserves `<extLst>`/`<headerFooter>` content). Takes roughly 48 seconds.
 
 ### `phpp-tool inspect-map` — audit field map coverage
+
+```bash
+phpp-tool inspect-map [--phpp-version PHPP_VERSION] [--field-map FIELD_MAP]
+```
+
+- `--phpp-version PHPP_VERSION` — resolves `phpp-field-mapping/<version>.md` (default `EN_10_6_IP`).
+- `--field-map FIELD_MAP` — direct-path override, bypassing `--phpp-version` entirely.
+
+Example:
 
 ```bash
 phpp-tool inspect-map --phpp-version EN_10_6_IP
@@ -99,11 +120,21 @@ Prints every mapped worksheet with its field/section/config counts. Use this aft
 ### `scripts/roundtrip.py` — end-to-end verification
 
 ```bash
+python scripts/roundtrip.py [--phpp-version PHPP_VERSION] SOURCE TEMPLATE [SOURCE TEMPLATE ...]
+```
+
+- `--phpp-version PHPP_VERSION` — resolves `phpp-field-mapping/<version>.md` (default `EN_10_6_IP`); if given, must appear before the `SOURCE`/`TEMPLATE` pairs.
+- `SOURCE` (positional, required, repeatable) — filled `.xlsx` to read from.
+- `TEMPLATE` (positional, required, repeatable) — blank `.xlsx` to write into, paired with the `SOURCE` immediately before it. Pass additional `SOURCE TEMPLATE` pairs on the same command line to run several roundtrips in one invocation (results print a combined summary at the end).
+
+Example:
+
+```bash
 python scripts/roundtrip.py Data/Example_IP.xlsx Data/Empty_IP.xlsx
 python scripts/roundtrip.py Data/Empty_IP.xlsx Data/Empty_IP.xlsx
 ```
 
-Arguments come in `source template` pairs — pass more pairs on the same command line to run several roundtrips in one invocation (results print a combined summary at the end). Output artifacts land in `records/roundtrip_<timestamp>/`. Requires Excel throughout (read, address resolution, and the final openpyxl-based cell verification).
+Output artifacts land in `records/roundtrip_<timestamp>/`. Requires Excel throughout (read, address resolution, and the final openpyxl-based cell verification).
 
 | Phase | What runs |
 |-------|-----------|
