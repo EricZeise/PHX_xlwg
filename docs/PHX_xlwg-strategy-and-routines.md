@@ -152,7 +152,13 @@ Unlike PHX_pyxl's roundtrip script, there is no separate "Part 2" Excel-cache-va
 ### Running the test suite
 
 ```bash
-pytest tests/ -v          # 93 tests, requires Excel, ~9s
+uv run pytest -m "not excel" -v   # 104 tests, <1 s, no Excel launched (this is what the review gate runs)
+uv run pytest tests/ -v            # all 105: also the live-Excel roundtrip (launches Excel 2021, macOS consent prompts)
+
+# The review gate (CLAUDE.md, "Review gate" and "Step 2")
+uv run ruff check . && uv run ruff format --check . && uv run isort --check-only . \
+  && uv run ty check --error-on-warning && uv lock --check && uv run pytest -q -m "not excel"
+uv run python scripts/check_ratchet.py && uv run python scripts/run_with_coverage.py
 ```
 
 ### Quick reference
@@ -163,11 +169,18 @@ pytest tests/ -v          # 93 tests, requires Excel, ~9s
 | Write JSON → blank PHPP | `phpp-tool write records/my_building.json Data/Empty_IP.xlsx -o output.xlsx` |
 | Check field map coverage | `phpp-tool inspect-map` |
 | Roundtrip verification | `python scripts/roundtrip.py Data/Example_IP.xlsx Data/Empty_IP.xlsx` |
-| Unit tests | `pytest tests/ -v` |
+| Unit tests (no Excel) | `uv run pytest -m "not excel" -v` |
+| Live-Excel roundtrip test | `uv run pytest tests/test_cli.py -m excel -v` |
 
 ---
 
 ## Part 3 — Routine-by-Routine Walkthrough
+
+### `atomic.py` — Atomic file output (added 2026-11-09, ported from PHX_pyxl)
+
+**Strategy role:** The JSON building record (`phpp-tool read -o`), the `compare_json` reports and the surgical workbook rewrite go through `atomic_write_bytes` / `atomic_write_text` / `atomic_copy`: a temporary file beside the destination, flushed to disk, then moved over the destination in one `os.replace`. A crash, a full disk or an interruption leaves the previous file as it was, the temporary file is removed on any failure, and an existing file keeps its permissions. Covered by `tests/test_atomic.py`.
+
+**Known limit:** `writer.write_phpp` still copies the template onto the output path (`shutil.copy2`) *before* Excel is opened, so an existing output is replaced at that moment; a failure between that copy and the final atomic rewrite (an Excel hang, the user cancelling) leaves a template copy rather than the previous output. Closing it means opening a working copy in Excel instead of the output path -- a change to the live-Excel flow (file-access prompts, lock files) that needs a run with Excel before it is trusted.
 
 ### `excel_app.py` — Excel application factory
 
@@ -451,7 +464,7 @@ Lists every mapped worksheet with counts of fields, sections, and config items. 
 
 The roundtrip test answers a single question: **does every input value survive the full read → JSON → write cycle unchanged?**
 
-This is not a unit test of individual functions — those are covered by the 93 pytest cases. The roundtrip test is an integration test of the entire pipeline against real PHPP workbooks. It treats the tool as a black box and verifies the output against the input at the cell level.
+This is not a unit test of individual functions — those are covered by the 104 Excel-free pytest cases (plus one live-Excel roundtrip test). The roundtrip test is an integration test of the entire pipeline against real PHPP workbooks. It treats the tool as a black box and verifies the output against the input at the cell level.
 
 #### Why cell-by-cell verification matters
 

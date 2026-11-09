@@ -74,8 +74,11 @@ def write_phpp(
                 continue
             sheet_name = resolve_sheet_name(ws_spec["sheet_name"], sheet_names)
             if sheet_name is None:
-                logger.warning("Sheet %r not in template, skipping %s",
-                               ws_spec["sheet_name"], ws_key)
+                logger.warning(
+                    "Sheet %r not in template, skipping %s",
+                    ws_spec["sheet_name"],
+                    ws_key,
+                )
                 continue
             ws = wb.sheets[sheet_name]
             total_writes += _write_worksheet(ws, wb, ws_spec, ws_data, pending)
@@ -91,7 +94,8 @@ def write_phpp(
             "Skipped %d write(s) that targeted a cell already holding a "
             "formula in the template (see surgical_writer warnings above "
             "for exact cells) -- likely a block locator over-reading its "
-            "intended range", len(skipped),
+            "intended range",
+            len(skipped),
         )
         pending = [w for w in pending if (w[0], w[1], w[2]) not in skipped]
 
@@ -103,8 +107,12 @@ def write_phpp(
 # Cell writing
 # ======================================================================
 
+
 def _write_cell(
-    ws: xw.Sheet, col: str, row: int, value: Any,
+    ws: xw.Sheet,
+    col: str,
+    row: int,
+    value: Any,
     pending: list[tuple[str, str, int, Any]],
 ) -> bool:
     """Record a cell write for later openpyxl persistence. Returns True if recorded."""
@@ -119,6 +127,7 @@ def _write_cell(
 # ======================================================================
 # Worksheet dispatch
 # ======================================================================
+
 
 def _write_worksheet(
     ws: xw.Sheet,
@@ -142,6 +151,7 @@ def _write_worksheet(
 
 # --- Strategy 1: label-anchored fields ---
 
+
 def _write_label_anchored(
     ws: xw.Sheet,
     fields: dict[str, dict],
@@ -158,21 +168,23 @@ def _write_label_anchored(
             # overwrite the computed formula, corrupting the workbook.
             logger.warning(
                 "Field %r is tagged (output), skipping write to avoid "
-                "overwriting a formula cell", field_name,
+                "overwriting a formula cell",
+                field_name,
             )
             continue
         row = find_row_in_col(ws, spec["locator_col"], spec["locator_string"])
         if row is None:
-            logger.warning("Label %r not found for write",
-                           spec["locator_string"])
+            logger.warning("Label %r not found for write", spec["locator_string"])
             continue
-        if _write_cell(ws, spec["input_col"],
-                       row + spec.get("row_offset", 0), value, pending):
+        if _write_cell(
+            ws, spec["input_col"], row + spec.get("row_offset", 0), value, pending
+        ):
             count += 1
     return count
 
 
 # --- Section dispatch ---
+
 
 def _write_section(
     ws: xw.Sheet,
@@ -194,25 +206,24 @@ def _write_section(
     if has_header and has_entry and has_row_fields and not has_col_fields:
         return _write_row_offset(ws, sec_spec, sec_data, pending)
     if has_col_fields and has_row_fields:
-        return _write_column_row(ws, sec_spec, sec_data, entry_row_start,
-                                 pending)
+        return _write_column_row(ws, sec_spec, sec_data, entry_row_start, pending)
     if has_header and has_entry and has_col_fields:
         return _write_block(ws, sec_spec, sec_data, entry_row_start, pending)
     if has_col_fields and not has_header:
-        return _write_static_column(ws, sec_spec, sec_data, entry_row_start,
-                                    pending)
+        return _write_static_column(ws, sec_spec, sec_data, entry_row_start, pending)
     if has_col_fields and entry_row_start is not None:
         return _write_block(ws, sec_spec, sec_data, entry_row_start, pending)
     if has_items:
-        return _write_items(ws, wb, items, sec_spec.get("items_kind", {}),
-                            sec_data, pending)
+        return _write_items(
+            ws, wb, items, sec_spec.get("items_kind", {}), sec_data, pending
+        )
     if has_fields:
-        return _write_label_anchored(ws, sec_spec["fields"], sec_data,
-                                     pending)
+        return _write_label_anchored(ws, sec_spec["fields"], sec_data, pending)
     return 0
 
 
 # --- Strategy 2: repeating block ---
+
 
 def _write_block(
     ws: xw.Sheet,
@@ -229,16 +240,15 @@ def _write_block(
         entry_string = entry_locator.get("string", "")
         if entry_string:
             entry_col = entry_locator.get(
-                "col", sec_spec.get("header_locator", {}).get("col", "A"))
+                "col", sec_spec.get("header_locator", {}).get("col", "A")
+            )
             hdr = sec_spec.get("header_locator", {})
             hdr_row = 1
             if hdr.get("string"):
-                hdr_found = find_row_in_col(
-                    ws, hdr.get("col", "A"), hdr["string"])
+                hdr_found = find_row_in_col(ws, hdr.get("col", "A"), hdr["string"])
                 if hdr_found is not None:
                     hdr_row = hdr_found
-            found = find_row_in_col(
-                ws, entry_col, entry_string, start_from=hdr_row)
+            found = find_row_in_col(ws, entry_col, entry_string, start_from=hdr_row)
             if found is not None:
                 col_fields = sec_spec.get("column_fields", {})
                 if is_entry_row_header(ws, found, col_fields):
@@ -246,8 +256,7 @@ def _write_block(
                 else:
                     entry_row_start = found
 
-    has_row_metadata = all(
-        "_row" in rd for rd in rows_data) if rows_data else False
+    has_row_metadata = all("_row" in rd for rd in rows_data) if rows_data else False
     if entry_row_start is None and not has_row_metadata:
         logger.warning("Cannot determine block start row for write")
         return 0
@@ -262,13 +271,15 @@ def _write_block(
         else:
             continue
         for field_name, field_spec in column_fields.items():
-            if _write_cell(ws, field_col(field_spec), target_row,
-                           row_data.get(field_name), pending):
+            if _write_cell(
+                ws, field_col(field_spec), target_row, row_data.get(field_name), pending
+            ):
                 count += 1
     return count
 
 
 # --- Row-offset section (DHW recirc/branch piping) ---
+
 
 def _write_row_offset(
     ws: xw.Sheet,
@@ -281,8 +292,7 @@ def _write_row_offset(
     entry_loc = sec_spec["entry_locator"]
     anchor_row = find_row_in_col(ws, entry_loc["col"], entry_loc["string"])
     if anchor_row is None:
-        logger.warning("Entry locator %r not found for write",
-                       entry_loc["string"])
+        logger.warning("Entry locator %r not found for write", entry_loc["string"])
         return 0
     input_col = sec_spec.get("items", {}).get("input_col_start", "J")
     count = 0
@@ -298,6 +308,7 @@ def _write_row_offset(
 
 # --- Column + row section (DHW tanks) ---
 
+
 def _write_column_row(
     ws: xw.Sheet,
     sec_spec: dict[str, Any],
@@ -310,8 +321,7 @@ def _write_column_row(
     if entry_row_start is None:
         entry_loc = sec_spec.get("entry_locator", {})
         if entry_loc:
-            entry_row_start = find_row_in_col(
-                ws, entry_loc["col"], entry_loc["string"])
+            entry_row_start = find_row_in_col(ws, entry_loc["col"], entry_loc["string"])
         if entry_row_start is None:
             return 0
 
@@ -326,13 +336,13 @@ def _write_column_row(
             if value is None:
                 continue
             offset = field_row_offset(field_spec)
-            if _write_cell(ws, col_letter, entry_row_start + offset, value,
-                           pending):
+            if _write_cell(ws, col_letter, entry_row_start + offset, value, pending):
                 count += 1
     return count
 
 
 # --- Static column section ---
+
 
 def _write_static_column(
     ws: xw.Sheet,
@@ -352,13 +362,15 @@ def _write_static_column(
     for i, row_data in enumerate(data):
         target_row = row_data.get("_row", start_row + i)
         for field_name, field_spec in column_fields.items():
-            if _write_cell(ws, field_col(field_spec), target_row,
-                           row_data.get(field_name), pending):
+            if _write_cell(
+                ws, field_col(field_spec), target_row, row_data.get(field_name), pending
+            ):
                 count += 1
     return count
 
 
 # --- Items section (Overview, SolarDHW, CoolingUnits, PER) ---
+
 
 def _write_items(
     ws: xw.Sheet,
@@ -376,24 +388,31 @@ def _write_items(
         if value is None:
             continue
         if isinstance(spec_value, dict):
-            if "col" in spec_value and "row" in spec_value:
-                if _write_cell(ws, spec_value["col"],
-                               spec_value["row"], value, pending):
-                    count += 1
+            if (
+                "col" in spec_value
+                and "row" in spec_value
+                and _write_cell(
+                    ws, spec_value["col"], spec_value["row"], value, pending
+                )
+            ):
+                count += 1
             continue
         kind = items_kind.get(key, "literal")
         if kind == "address":
             col, row = parse_cell_ref(spec_value)
             if _write_cell(ws, col, row, value, pending):
                 count += 1
-        elif kind == "named_range":
-            if _write_named_range(wb, spec_value, value, pending):
-                count += 1
+        elif kind == "named_range" and _write_named_range(
+            wb, spec_value, value, pending
+        ):
+            count += 1
     return count
 
 
 def _write_named_range(
-    wb: xw.Book, name: str, value: Any,
+    wb: xw.Book,
+    name: str,
+    value: Any,
     pending: list[tuple[str, str, int, Any]],
 ) -> bool:
     """Resolve a named range via xlwings and record the write."""

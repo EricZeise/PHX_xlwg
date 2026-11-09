@@ -27,6 +27,7 @@ SPARSE_ROW_BREAK_THRESHOLD = 3
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def norm(value: Any) -> str:
     """Normalize a label for comparison: NFKC, NBSP→space, strip, casefold."""
     if value is None:
@@ -88,9 +89,11 @@ def field_row_offset(spec: dict) -> int:
 
 def resolve_entry_row_start(items: dict) -> int | None:
     """Look up a block's entry-start row from any of its recognized key aliases."""
-    return (items.get("entry_row_start")
-            or items.get("entry_start_row")
-            or items.get("start_row"))
+    return (
+        items.get("entry_row_start")
+        or items.get("entry_start_row")
+        or items.get("start_row")
+    )
 
 
 def is_formula(ws: xw.Sheet, col: str, row: int) -> bool:
@@ -100,7 +103,11 @@ def is_formula(ws: xw.Sheet, col: str, row: int) -> bool:
 
 
 def cell_value(
-    ws: xw.Sheet, col: str, row: int, *, skip_formulas: bool = False,
+    ws: xw.Sheet,
+    col: str,
+    row: int,
+    *,
+    skip_formulas: bool = False,
 ) -> Any:
     """Read a single cell by column letter(s) and row number.
 
@@ -119,8 +126,13 @@ _BATCH_CHUNK_SIZE = 50
 
 
 def _read_rect_chunked(
-    ws: xw.Sheet, min_col: int, max_col: int, start_row: int, end_row: int,
-    *, attr: str = "value",
+    ws: xw.Sheet,
+    min_col: int,
+    max_col: int,
+    start_row: int,
+    end_row: int,
+    *,
+    attr: str = "value",
 ) -> list[list[Any]]:
     """Read a rectangular region (all rows, min_col..max_col), row-chunked.
 
@@ -159,7 +171,13 @@ def _read_rect_chunked(
             logger.debug(
                 "Batch %s read for cols %d-%d rows %d-%d returned %d rows, "
                 "expected %d -- falling back to per-row read for this chunk",
-                attr, min_col, max_col, row, chunk_end, len(raw), expected_len,
+                attr,
+                min_col,
+                max_col,
+                row,
+                chunk_end,
+                len(raw),
+                expected_len,
             )
             raw = []
             for r in range(row, chunk_end + 1):
@@ -172,8 +190,12 @@ def _read_rect_chunked(
 
 
 def find_row_in_col(
-    ws: xw.Sheet, col: str, needle: str, *,
-    contains: bool = True, start_from: int = 1,
+    ws: xw.Sheet,
+    col: str,
+    needle: str,
+    *,
+    contains: bool = True,
+    start_from: int = 1,
 ) -> int | None:
     """Return the first row where ``col``'s cell text matches *needle*.
 
@@ -195,9 +217,8 @@ def find_row_in_col(
         if contains:
             if needle_n in cell_n:
                 return start_from + i
-        else:
-            if cell_n == needle_n:
-                return start_from + i
+        elif cell_n == needle_n:
+            return start_from + i
     return None
 
 
@@ -218,11 +239,15 @@ def is_header_row(row_data: dict[str, Any]) -> bool:
 
 
 def is_entry_row_header(
-    ws: xw.Sheet, row: int, column_fields: dict[str, dict],
+    ws: xw.Sheet,
+    row: int,
+    column_fields: dict[str, dict],
 ) -> bool:
     """Check if the entry locator row is a column header, not a data row."""
-    row_data = {name: cell_value(ws, field_col(spec), row)
-                for name, spec in column_fields.items()}
+    row_data = {
+        name: cell_value(ws, field_col(spec), row)
+        for name, spec in column_fields.items()
+    }
     return is_header_row(row_data)
 
 
@@ -230,8 +255,12 @@ def is_entry_row_header(
 # Strategy 1: Label-anchored relative
 # ---------------------------------------------------------------------------
 
+
 def is_label_anchored_formula(
-    ws: xw.Sheet, locator_col: str, locator_string: str, input_col: str,
+    ws: xw.Sheet,
+    locator_col: str,
+    locator_string: str,
+    input_col: str,
     row_offset: int = 0,
 ) -> bool | None:
     """Return whether a label-anchored field's target cell is a formula.
@@ -259,11 +288,12 @@ def resolve_label_anchored(
     if row is None:
         logger.warning(
             "Label %r not found in column %s of sheet %r",
-            locator_string, locator_col, ws.name,
+            locator_string,
+            locator_col,
+            ws.name,
         )
         return None
-    return cell_value(ws, input_col, row + row_offset,
-                      skip_formulas=skip_formulas)
+    return cell_value(ws, input_col, row + row_offset, skip_formulas=skip_formulas)
 
 
 # ---------------------------------------------------------------------------
@@ -307,13 +337,14 @@ def resolve_block(
         """
         if not entry_string:
             return None, False
-        hdr_row = find_row_in_col(
-            ws, header_locator["col"], header_locator["string"]
-        )
+        hdr_row = find_row_in_col(ws, header_locator["col"], header_locator["string"])
         if hdr_row is None:
             return None, False
         start_row_found = find_row_in_col(
-            ws, entry_col, entry_string, start_from=hdr_row,
+            ws,
+            entry_col,
+            entry_string,
+            start_from=hdr_row,
         )
         if start_row_found is None:
             return None, True
@@ -334,7 +365,10 @@ def resolve_block(
                     "entry_row_start=%d for entry label %r in sheet %r "
                     "disagrees with the discovered row %d -- using "
                     "entry_row_start, but the field map may be stale",
-                    entry_row_start, entry_string, ws.name, discovered,
+                    entry_row_start,
+                    entry_string,
+                    ws.name,
+                    discovered,
                 )
     else:
         if not entry_string:
@@ -344,7 +378,8 @@ def resolve_block(
             if not header_found:
                 logger.warning(
                     "Block header %r not found in column %s",
-                    header_locator["string"], header_locator["col"],
+                    header_locator["string"],
+                    header_locator["col"],
                 )
             return []
         start_row = discovered
@@ -357,7 +392,7 @@ def resolve_block(
     entry_col_idx = col_to_idx(entry_col)
     field_names = list(column_fields.keys())
     field_col_idxs = [col_to_idx(field_col(column_fields[f])) for f in field_names]
-    all_col_idxs = sorted(set(field_col_idxs + [entry_col_idx]))
+    all_col_idxs = sorted({*field_col_idxs, entry_col_idx})
     min_col = min(all_col_idxs)
     max_col = max(all_col_idxs)
 
@@ -372,7 +407,8 @@ def resolve_block(
     formula_mask = None
     if skip_formulas:
         formula_mask = _read_rect_chunked(
-            ws, min_col, max_col, start_row, last_row, attr="formula")
+            ws, min_col, max_col, start_row, last_row, attr="formula"
+        )
 
     entry_offset = entry_col_idx - min_col
     field_offsets = [idx - min_col for idx in field_col_idxs]
@@ -407,7 +443,8 @@ def resolve_block(
             if entry_bold:
                 logger.debug(
                     "Stopping block scan at row %d in sheet %r -- entry "
-                    "column is bold, signaling a new section", row_num,
+                    "column is bold, signaling a new section",
+                    row_num,
                     ws.name,
                 )
                 break
@@ -442,8 +479,7 @@ def resolve_block(
             consecutive_sparse = 0
             continue
 
-        non_row = [v for k, v in raw_data.items()
-                   if k != "_row" and v is not None]
+        non_row = [v for k, v in raw_data.items() if k != "_row" and v is not None]
         has_string = any(isinstance(v, str) for v in non_row)
         if not has_string and len(non_row) <= max(n_fields // 3, 1):
             consecutive_sparse += 1
@@ -478,8 +514,7 @@ def _resolve_si_mirror_passthrough(wb: xw.Book, rng: xw.Range) -> Any:
     formula; otherwise returns _NOT_FOUND so the caller keeps its existing
     behavior.
     """
-    base_title = base_sheet_for_si_mirror(
-        rng.sheet.name, [s.name for s in wb.sheets])
+    base_title = base_sheet_for_si_mirror(rng.sheet.name, [s.name for s in wb.sheets])
     if base_title is None:
         return _NOT_FOUND
     base_rng = wb.sheets[base_title].range(rng.address)
@@ -490,7 +525,10 @@ def _resolve_si_mirror_passthrough(wb: xw.Book, rng: xw.Range) -> Any:
 
 
 def resolve_named_range(
-    wb: xw.Book, name: str, *, skip_formulas: bool = False,
+    wb: xw.Book,
+    name: str,
+    *,
+    skip_formulas: bool = False,
 ) -> Any:
     """Resolve a German Excel defined name to its value."""
     try:
@@ -520,8 +558,12 @@ def resolve_named_range(
 # Strategy 4: Absolute address
 # ---------------------------------------------------------------------------
 
+
 def resolve_absolute(
-    ws: xw.Sheet, address: str, *, skip_formulas: bool = False,
+    ws: xw.Sheet,
+    address: str,
+    *,
+    skip_formulas: bool = False,
 ) -> Any:
     """Return the value at a fixed cell reference like 'C11'."""
     col, row = parse_cell_ref(address)
@@ -532,6 +574,7 @@ def resolve_absolute(
 # Strategy 5: Column + row-offset within a block
 # ---------------------------------------------------------------------------
 
+
 def resolve_row_offset(
     ws: xw.Sheet,
     anchor_row: int,
@@ -541,16 +584,20 @@ def resolve_row_offset(
     skip_formulas: bool = False,
 ) -> Any:
     """Return value at *col*, *anchor_row* + *row_offset*."""
-    return cell_value(ws, col, anchor_row + row_offset,
-                      skip_formulas=skip_formulas)
+    return cell_value(ws, col, anchor_row + row_offset, skip_formulas=skip_formulas)
 
 
 # ---------------------------------------------------------------------------
 # Strategy 6: Fixed result rows/cols
 # ---------------------------------------------------------------------------
 
+
 def resolve_fixed(
-    ws: xw.Sheet, *, row: int, col: str, skip_formulas: bool = False,
+    ws: xw.Sheet,
+    *,
+    row: int,
+    col: str,
+    skip_formulas: bool = False,
 ) -> Any:
     """Read a fixed result location (typically formula outputs)."""
     return cell_value(ws, col, row, skip_formulas=skip_formulas)

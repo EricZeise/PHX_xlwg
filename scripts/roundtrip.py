@@ -42,8 +42,9 @@ DEFAULT_PHPP_VERSION = "EN_10_6_IP"
 def _field_map_for_version(phpp_version: str) -> str:
     path = ROOT / "phpp-field-mapping" / f"{phpp_version}.md"
     if not path.exists():
-        print(f"No field map found for --phpp-version {phpp_version!r} "
-              f"(expected {path})")
+        print(
+            f"No field map found for --phpp-version {phpp_version!r} (expected {path})"
+        )
         sys.exit(1)
     return str(path)
 
@@ -104,6 +105,7 @@ def _verify_writes(
     Returns (checked, mismatches, detail_lines).
     """
     import warnings
+
     warnings.filterwarnings("ignore", category=UserWarning)
     from openpyxl import load_workbook
 
@@ -127,7 +129,8 @@ def _verify_writes(
             details.append(
                 f"  {sheet_name}!{col}{row}:"
                 f" expected {expected!r} ({type(expected).__name__}),"
-                f" got {actual!r} ({type(actual).__name__})")
+                f" got {actual!r} ({type(actual).__name__})"
+            )
 
     wb.close()
     return checked, mismatched, details
@@ -147,9 +150,11 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
     data_inputs = read_phpp(str(source), FIELD_MAP, skip_formulas=True)
     t_read_inputs = time.time() - t0
     total_i, non_none_i = _count_values(data_inputs)
-    print(f"      {len(data_inputs)} worksheets,"
-          f" {non_none_i} non-None / {total_i} total values,"
-          f" {t_read_inputs:.1f}s")
+    print(
+        f"      {len(data_inputs)} worksheets,"
+        f" {non_none_i} non-None / {total_i} total values,"
+        f" {t_read_inputs:.1f}s"
+    )
 
     json_inputs = out_dir / f"{source_name}_inputs.json"
     json_inputs.write_text(
@@ -162,17 +167,17 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
     data_all = read_phpp(str(source), FIELD_MAP, skip_formulas=False)
     t_read_all = time.time() - t0
     total_a, non_none_a = _count_values(data_all)
-    print(f"      {len(data_all)} worksheets,"
-          f" {non_none_a} non-None / {total_a} total values,"
-          f" {t_read_all:.1f}s")
+    print(
+        f"      {len(data_all)} worksheets,"
+        f" {non_none_a} non-None / {total_a} total values,"
+        f" {t_read_all:.1f}s"
+    )
     filtered = non_none_a - non_none_i
     pct = 100 * filtered / max(non_none_a, 1)
     print(f"      Formula filter removed {filtered} values ({pct:.1f}%)")
 
     json_all = out_dir / f"{source_name}_all.json"
-    json_all.write_text(
-        json.dumps(data_all, indent=2, default=str), encoding="utf-8"
-    )
+    json_all.write_text(json.dumps(data_all, indent=2, default=str), encoding="utf-8")
 
     # Step 3: write into template (writer returns its write list)
     written_path = out_dir / f"{source_name}_written.xlsx"
@@ -185,8 +190,7 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
     # Step 4: verify every written cell
     print(f"\n[4/4] Verifying {len(writes)} written cells (openpyxl) ...")
     t0 = time.time()
-    checked, mismatched, mismatch_details = _verify_writes(
-        written_path, writes)
+    checked, mismatched, mismatch_details = _verify_writes(written_path, writes)
     t_verify = time.time() - t0
 
     if mismatched == 0:
@@ -200,9 +204,11 @@ def roundtrip(source: Path, template: Path, out_dir: Path) -> dict:
     print(f"      {t_verify:.1f}s")
 
     total_t = t_read_inputs + t_read_all + t_write + t_verify
-    print(f"\n  Timing: inputs {t_read_inputs:.1f}s + all {t_read_all:.1f}s"
-          f" + write {t_write:.1f}s + verify {t_verify:.1f}s"
-          f" = {total_t:.1f}s total")
+    print(
+        f"\n  Timing: inputs {t_read_inputs:.1f}s + all {t_read_all:.1f}s"
+        f" + write {t_write:.1f}s + verify {t_verify:.1f}s"
+        f" = {total_t:.1f}s total"
+    )
     print(f"  Artifacts saved to {out_dir}/")
 
     return {
@@ -225,11 +231,11 @@ def main() -> None:
     for i, arg in enumerate(args):
         if arg.startswith("--phpp-version="):
             FIELD_MAP = _field_map_for_version(arg.split("=", 1)[1])
-            args = args[:i] + args[i + 1:]
+            args = args[:i] + args[i + 1 :]
             break
         if arg == "--phpp-version" and i + 1 < len(args):
             FIELD_MAP = _field_map_for_version(args[i + 1])
-            args = args[:i] + args[i + 2:]
+            args = args[:i] + args[i + 2 :]
             break
 
     if len(args) < 2:
@@ -257,12 +263,14 @@ def main() -> None:
         print("  COMBINED SUMMARY")
         print(f"{'=' * 60}\n")
         for s in summaries:
-            print(f"  {s['source']:20s} → {s['template']:20s}"
-                  f"  written: {s['cells_written']:>4}"
-                  f"  verified: {s['cells_verified']:>4}"
-                  f"  mismatches: {s['mismatches']:>3}"
-                  f"  formulas filtered: {s['formulas_filtered']:>4}"
-                  f"  time: {s['time_total']:.1f}s")
+            print(
+                f"  {s['source']:20s} → {s['template']:20s}"
+                f"  written: {s['cells_written']:>4}"
+                f"  verified: {s['cells_verified']:>4}"
+                f"  mismatches: {s['mismatches']:>3}"
+                f"  formulas filtered: {s['formulas_filtered']:>4}"
+                f"  time: {s['time_total']:.1f}s"
+            )
 
 
 if __name__ == "__main__":

@@ -87,6 +87,7 @@ def _read_cell(path: Path, sheet: str, ref: str):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.excel
 @pytest.mark.usefixtures("require_excel")
 class TestExcelRoundTrip:
     def test_read_write_roundtrip(self, tmp_path):
@@ -96,11 +97,17 @@ class TestExcelRoundTrip:
         runner = CliRunner()
 
         # --- Read filled workbook → JSON (1 open_book call) ---
-        result = runner.invoke(main, [
-            "read", str(filled_path),
-            "-o", str(json_path),
-            "--field-map", str(map_path),
-        ])
+        result = runner.invoke(
+            main,
+            [
+                "read",
+                str(filled_path),
+                "-o",
+                str(json_path),
+                "--field-map",
+                str(map_path),
+            ],
+        )
         assert result.exit_code == 0, result.output
         assert "Written to" in result.output
 
@@ -111,17 +118,25 @@ class TestExcelRoundTrip:
 
         # Validate through pydantic model (replaces test_reader_output_validates)
         from phpp_tool.models import BuildingRecord
+
         record = BuildingRecord.model_validate(data)
         assert record.VERIFICATION is not None
 
         # --- Write JSON → blank template (1 open_book call) ---
         template_path = _make_blank_template(tmp_path)
         out_path = tmp_path / "populated.xlsx"
-        result = runner.invoke(main, [
-            "write", str(json_path), str(template_path),
-            "-o", str(out_path),
-            "--field-map", str(map_path),
-        ])
+        result = runner.invoke(
+            main,
+            [
+                "write",
+                str(json_path),
+                str(template_path),
+                "-o",
+                str(out_path),
+                "--field-map",
+                str(map_path),
+            ],
+        )
         assert result.exit_code == 0, result.output
         assert "Written to" in result.output
 
@@ -138,20 +153,29 @@ class TestExcelRoundTrip:
 class TestReadErrors:
     def test_read_missing_workbook(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "read", str(tmp_path / "nonexistent.xlsx"),
-        ])
+        result = runner.invoke(
+            main,
+            [
+                "read",
+                str(tmp_path / "nonexistent.xlsx"),
+            ],
+        )
         assert result.exit_code != 0
 
 
 class TestWriteErrors:
     def test_write_missing_record(self, tmp_path):
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "write", str(tmp_path / "missing.json"),
-            str(tmp_path / "template.xlsx"),
-            "-o", str(tmp_path / "out.xlsx"),
-        ])
+        result = runner.invoke(
+            main,
+            [
+                "write",
+                str(tmp_path / "missing.json"),
+                str(tmp_path / "template.xlsx"),
+                "-o",
+                str(tmp_path / "out.xlsx"),
+            ],
+        )
         assert result.exit_code != 0
 
 
@@ -160,9 +184,14 @@ class TestInspectMapCommand:
         map_path = _make_mini_map(tmp_path)
 
         runner = CliRunner()
-        result = runner.invoke(main, [
-            "inspect-map", "--field-map", str(map_path),
-        ])
+        result = runner.invoke(
+            main,
+            [
+                "inspect-map",
+                "--field-map",
+                str(map_path),
+            ],
+        )
         assert result.exit_code == 0, result.output
         assert "VERIFICATION" in result.output
         assert "3 fields" in result.output

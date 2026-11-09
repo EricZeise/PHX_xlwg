@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import xlwings as xw
 
@@ -57,7 +58,7 @@ def is_shared(app: xw.App) -> bool:
     return _shared_app is not None and app is _shared_app
 
 
-def open_book(app: xw.App, path: str, **kwargs: object) -> xw.Book:
+def open_book(app: xw.App, path: str, **kwargs: Any) -> xw.Book:
     """Open a workbook, retrying once on macOS error -50.
 
     On macOS 26, rapid open/close cycles on a shared Excel instance can
@@ -66,7 +67,8 @@ def open_book(app: xw.App, path: str, **kwargs: object) -> xw.Book:
     """
     try:
         return app.books.open(path, **kwargs)
-    except Exception:
+    except Exception:  # noqa: BLE001 -- any AppleScript error on open is retried once (see above)
         import time
+
         time.sleep(1)
         return app.books.open(path, **kwargs)
